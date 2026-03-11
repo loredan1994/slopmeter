@@ -419,6 +419,8 @@ function drawHeatmapSection(
   const leftColumnX = x + 8;
   let maxValue = 0;
   let totalInputTokens = 0;
+  let totalCachedTokens = 0;
+  let totalCachedOutputTokens = 0;
   let totalOutputTokens = 0;
   let totalTokens = 0;
 
@@ -426,16 +428,22 @@ function drawHeatmapSection(
     valueByDate.set(formatLocalDate(row.date), row.total);
     maxValue = Math.max(maxValue, row.total);
     totalInputTokens += row.input;
+    totalCachedTokens += row.cache.input + row.cache.output;
+    totalCachedOutputTokens += row.cache.output;
     totalOutputTokens += row.output;
     totalTokens += row.total;
   }
 
   const topMetricGap = 120;
-  const headerInputX = rightEdge - topMetricGap * 2;
+  const headerInputX = rightEdge - topMetricGap * 3;
+  const headerCacheX = rightEdge - topMetricGap * 2;
   const headerOutputX = rightEdge - topMetricGap;
   const totalTokensLabel = formatTokenTotal(totalTokens);
   const totalInputLabel = formatTokenTotal(totalInputTokens);
+  const totalCachedLabel = formatTokenTotal(totalCachedTokens);
   const totalOutputLabel = formatTokenTotal(totalOutputTokens);
+  const cachedHeaderLabel =
+    totalCachedOutputTokens > 0 ? "Cached tokens" : "Cached input tokens";
   const longestStreak = insights?.streaks.longest ?? 0;
   const currentStreak = insights?.streaks.current ?? 0;
 
@@ -478,6 +486,34 @@ function drawHeatmapSection(
       "font-family": fontFamily,
     },
     totalInputLabel,
+  );
+
+  svg = svg.text(
+    {
+      x: headerCacheX,
+      y: y + layout.headerCaptionY,
+      fill: palette.muted,
+      "font-size": metricCaptionFontSize,
+      "font-weight": 600,
+      "text-anchor": "end",
+      "dominant-baseline": "hanging",
+      "font-family": fontFamily,
+    },
+    caption(cachedHeaderLabel),
+  );
+
+  svg = svg.text(
+    {
+      x: headerCacheX,
+      y: y + layout.headerValueY,
+      fill: palette.text,
+      "font-size": metricValueFontSize,
+      "font-weight": 600,
+      "text-anchor": "end",
+      "dominant-baseline": "hanging",
+      "font-family": fontFamily,
+    },
+    totalCachedLabel,
   );
 
   svg = svg.text(
