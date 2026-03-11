@@ -3,16 +3,20 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type { UsageSummary } from "../interfaces";
 import {
+  DEFAULT_FILE_PROCESS_CONCURRENCY,
+  FILE_PROCESS_CONCURRENCY_ENV,
   type DailyTotalsByDate,
   type DailyTokenTotals,
   type ModelTokenTotals,
   addDailyTokenTotals,
   addModelTokenTotals,
   createUsageSummary,
-  forEachJsonLine,
+  getPositiveIntegerEnv,
   getRecentWindowStart,
   listFilesRecursive,
   normalizeModelName,
+  readJsonLines,
+  runWithConcurrency,
 } from "./utils";
 
 const CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
@@ -104,6 +108,17 @@ function createClaudeTokenTotals(usage: ClaudeUsagePayload): DailyTokenTotals {
   };
 }
 
+async function getClaudeFiles() {
+  const projectDirs = getClaudeProjectDirs();
+  const files = (
+    await Promise.all(
+      projectDirs.map((projectDir) => listFilesRecursive(projectDir, ".jsonl")),
+    )
+  ).flat();
+
+  return files;
+}
+
 function createUniqueHash(messageId?: string, requestId?: string) {
   if (!messageId || !requestId) {
     return null;
@@ -116,65 +131,65 @@ export async function loadClaudeRows(
   startDate: Date,
   endDate: Date,
 ): Promise<UsageSummary> {
+  const files = await getClaudeFiles();
   const totals: DailyTotalsByDate = new Map();
   const modelTotals = new Map<string, ModelTokenTotals>();
   const recentModelTotals = new Map<string, ModelTokenTotals>();
   const recentStart = getRecentWindowStart(endDate, 30);
   const processedHashes = new Set<string>();
-  const projectDirs = getClaudeProjectDirs();
+  const fileConcurrency = getPositiveIntegerEnv(
+    FILE_PROCESS_CONCURRENCY_ENV,
+    DEFAULT_FILE_PROCESS_CONCURRENCY,
+  );
 
-  for (const projectDir of projectDirs) {
-    const files = await listFilesRecursive(projectDir, ".jsonl");
+  await runWithConcurrency(files, fileConcurrency, async (file) => {
+    for await (const line of readJsonLines<ClaudeRawLogEntry>(file)) {
+      const entry = parseClaudeLogEntry(line);
 
-    for (const file of files) {
-      await forEachJsonLine<ClaudeRawLogEntry>(file, (rawEntry) => {
-        const entry = parseClaudeLogEntry(rawEntry);
+      if (!entry) {
+        continue;
+      }
 
-        if (!entry) {
-          return;
-        }
+      const uniqueHash = createUniqueHash(entry.messageId, entry.requestId);
 
-        const uniqueHash = createUniqueHash(entry.messageId, entry.requestId);
+      if (uniqueHash && processedHashes.has(uniqueHash)) {
+        continue;
+      }
 
-        if (uniqueHash && processedHashes.has(uniqueHash)) {
-          return;
-        }
+      if (uniqueHash) {
+        processedHashes.add(uniqueHash);
+      }
 
-        if (uniqueHash) {
-          processedHashes.add(uniqueHash);
-        }
+      const timestamp = new Date(entry.timestamp);
 
-        const timestamp = new Date(entry.timestamp);
+      if (timestamp < startDate || timestamp > endDate) {
+        continue;
+      }
 
-        if (timestamp < startDate || timestamp > endDate) {
-          return;
-        }
+      const tokenTotals = createClaudeTokenTotals(entry.usage);
 
-        const tokenTotals = createClaudeTokenTotals(entry.usage);
+      if (tokenTotals.total <= 0) {
+        continue;
+      }
 
-        if (tokenTotals.total <= 0) {
-          return;
-        }
+      const modelName =
+        entry.model && entry.model !== "<synthetic>"
+          ? normalizeModelName(entry.model)
+          : undefined;
 
-        const modelName =
-          entry.model && entry.model !== "<synthetic>"
-            ? normalizeModelName(entry.model)
-            : undefined;
+      addDailyTokenTotals(totals, timestamp, tokenTotals, modelName);
 
-        addDailyTokenTotals(totals, timestamp, tokenTotals, modelName);
+      if (!modelName) {
+        continue;
+      }
 
-        if (!modelName) {
-          return;
-        }
+      addModelTokenTotals(modelTotals, modelName, tokenTotals);
 
-        addModelTokenTotals(modelTotals, modelName, tokenTotals);
-
-        if (timestamp >= recentStart) {
-          addModelTokenTotals(recentModelTotals, modelName, tokenTotals);
-        }
-      });
+      if (timestamp >= recentStart) {
+        addModelTokenTotals(recentModelTotals, modelName, tokenTotals);
+      }
     }
-  }
+  });
 
   return createUsageSummary(
     "claude",

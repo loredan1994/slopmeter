@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { readFile, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type {
@@ -40,6 +40,58 @@ interface TokenTotals {
 export type DailyTotalsByDate = Map<string, TokenTotals>;
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+export const DEFAULT_FILE_PROCESS_CONCURRENCY = 4;
+export const FILE_PROCESS_CONCURRENCY_ENV =
+  "SLOPMETER_FILE_PROCESS_CONCURRENCY";
+export const MAX_JSONL_RECORD_BYTES_ENV = "SLOPMETER_MAX_JSONL_RECORD_BYTES";
+export const DEFAULT_MAX_JSONL_RECORD_BYTES = 64 * 1024 * 1024;
+
+export interface JsonlRecord<TClassification = void> {
+  lineNumber: number;
+  rawLine: string;
+  byteLength: number;
+  classification: TClassification;
+}
+
+export type JsonlRecordDecision<TClassification> =
+  | { kind: "keep"; classification: TClassification }
+  | { kind: "skip" }
+  | { kind: "unknown" };
+
+interface ReadJsonlRecordsOptions<TClassification> {
+  classificationPrefixBytes?: number;
+  classify?: (prefix: string) => JsonlRecordDecision<TClassification>;
+  maxRecordBytes?: number;
+  onSkippedOversizedRecord?: (record: {
+    lineNumber: number;
+    byteLength: number;
+  }) => void;
+  oversizedErrorMessage?: (record: {
+    filePath: string;
+    lineNumber: number;
+    maxRecordBytes: number;
+    envVarName: string;
+  }) => string;
+}
+
+interface ReadJsonDocumentOptions {
+  maxBytes?: number;
+  oversizedErrorMessage?: (record: {
+    filePath: string;
+    maxBytes: number;
+    envVarName: string;
+  }) => string;
+}
+
+interface ParseJsonTextOptions {
+  maxBytes?: number;
+  oversizedErrorMessage?: (record: {
+    sourceLabel: string;
+    maxBytes: number;
+    envVarName: string;
+  }) => string;
+}
 
 function cloneTokenTotals(
   totals: DailyTokenTotals | ModelTokenTotals,
@@ -106,6 +158,44 @@ export function addDailyTokenTotals(
   }
 }
 
+export function mergeDailyTotalsByDate(
+  target: DailyTotalsByDate,
+  source: DailyTotalsByDate,
+) {
+  for (const [dateKey, sourceTotals] of source.entries()) {
+    const existing = target.get(dateKey);
+
+    if (!existing) {
+      const models = new Map<string, ModelTokenTotals>();
+
+      for (const [modelName, totals] of sourceTotals.models.entries()) {
+        models.set(modelName, cloneTokenTotals(totals));
+      }
+
+      target.set(dateKey, {
+        tokens: cloneTokenTotals(sourceTotals.tokens),
+        models,
+      });
+      continue;
+    }
+
+    mergeTokenTotals(existing.tokens, sourceTotals.tokens);
+
+    for (const [modelName, totals] of sourceTotals.models.entries()) {
+      addModelTokenTotals(existing.models, modelName, totals);
+    }
+  }
+}
+
+export function mergeModelTotals(
+  target: Map<string, ModelTokenTotals>,
+  source: Map<string, ModelTokenTotals>,
+) {
+  for (const [modelName, totals] of source.entries()) {
+    addModelTokenTotals(target, modelName, totals);
+  }
+}
+
 export function totalsToRows(totals: DailyTotalsByDate): DailyUsage[] {
   return [...totals.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
@@ -161,16 +251,375 @@ export async function listFilesRecursive(rootDir: string, extension: string) {
     }
   }
 
-  return files;
+  return files.sort((left, right) => left.localeCompare(right));
 }
 
-export async function readJsonLines<T>(filePath: string): Promise<T[]> {
-  const content = await readFile(filePath, "utf8");
+function defaultOversizedJsonlRecordMessage({
+  filePath,
+  lineNumber,
+  maxRecordBytes,
+  envVarName,
+}: {
+  filePath: string;
+  lineNumber: number;
+  maxRecordBytes: number;
+  envVarName: string;
+}) {
+  return `JSONL record exceeds ${maxRecordBytes} bytes in ${filePath}:${lineNumber}. Increase ${envVarName} to process this file.`;
+}
 
-  return content
-    .split(/\r?\n/)
-    .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line.trim()) as T);
+function defaultOversizedJsonDocumentMessage({
+  filePath,
+  maxBytes,
+  envVarName,
+}: {
+  filePath: string;
+  maxBytes: number;
+  envVarName: string;
+}) {
+  return `JSON document exceeds ${maxBytes} bytes in ${filePath}. Increase ${envVarName} to process this file.`;
+}
+
+function defaultOversizedJsonTextMessage({
+  sourceLabel,
+  maxBytes,
+  envVarName,
+}: {
+  sourceLabel: string;
+  maxBytes: number;
+  envVarName: string;
+}) {
+  return `JSON payload exceeds ${maxBytes} bytes in ${sourceLabel}. Increase ${envVarName} to process this payload.`;
+}
+
+function keepAllJsonlRecords<TClassification>(): JsonlRecordDecision<TClassification> {
+  return { kind: "keep", classification: undefined as TClassification };
+}
+
+export async function* readJsonlRecords<TClassification = void>(
+  filePath: string,
+  options: ReadJsonlRecordsOptions<TClassification> = {},
+): AsyncGenerator<JsonlRecord<TClassification>> {
+  const maxRecordBytes =
+    options.maxRecordBytes ??
+    getPositiveIntegerEnv(
+      MAX_JSONL_RECORD_BYTES_ENV,
+      DEFAULT_MAX_JSONL_RECORD_BYTES,
+    );
+  const classificationPrefixBytes =
+    options.classificationPrefixBytes ?? maxRecordBytes;
+  const classify = options.classify ?? keepAllJsonlRecords<TClassification>;
+  const oversizedErrorMessage =
+    options.oversizedErrorMessage ?? defaultOversizedJsonlRecordMessage;
+  const stream = createReadStream(filePath);
+  let lineNumber = 0;
+  let lineBytesSeen = 0;
+  let retainedBytes = 0;
+  let prefixBytes = 0;
+  let exceededLimit = false;
+  let decision: JsonlRecordDecision<TClassification> = { kind: "unknown" };
+  let prefixChunks: Buffer[] = [];
+  let retainedChunks: Buffer[] = [];
+
+  const resetRecord = () => {
+    lineBytesSeen = 0;
+    retainedBytes = 0;
+    prefixBytes = 0;
+    exceededLimit = false;
+    decision = { kind: "unknown" };
+    prefixChunks = [];
+    retainedChunks = [];
+  };
+
+  const maybeClassify = () => {
+    if (decision.kind !== "unknown" || prefixBytes === 0) {
+      return;
+    }
+
+    decision = classify(Buffer.concat(prefixChunks, prefixBytes).toString("utf8"));
+
+    if (decision.kind === "skip") {
+      retainedChunks = [];
+      retainedBytes = 0;
+    }
+  };
+
+  const appendSegment = (segment: Buffer) => {
+    if (segment.length === 0) {
+      return;
+    }
+
+    lineBytesSeen += segment.length;
+
+    if (prefixBytes < classificationPrefixBytes) {
+      const prefixSegment = segment.subarray(
+        0,
+        Math.min(segment.length, classificationPrefixBytes - prefixBytes),
+      );
+
+      prefixChunks.push(prefixSegment);
+      prefixBytes += prefixSegment.length;
+      maybeClassify();
+    }
+
+    if (decision.kind === "skip") {
+      return;
+    }
+
+    const remainingBytes = maxRecordBytes - retainedBytes;
+
+    if (remainingBytes > 0) {
+      const retainedSegment = segment.subarray(
+        0,
+        Math.min(segment.length, remainingBytes),
+      );
+
+      if (retainedSegment.length > 0) {
+        retainedChunks.push(retainedSegment);
+        retainedBytes += retainedSegment.length;
+      }
+    }
+
+    if (segment.length > remainingBytes) {
+      exceededLimit = true;
+    }
+  };
+
+  const resolveDecision = () => {
+    if (decision.kind !== "unknown") {
+      return decision;
+    }
+
+    const candidate =
+      exceededLimit || retainedBytes === 0
+        ? Buffer.concat(prefixChunks, prefixBytes).toString("utf8")
+        : Buffer.concat(retainedChunks, retainedBytes).toString("utf8");
+
+    return classify(candidate);
+  };
+
+  const finalizeRecord = () => {
+    lineNumber += 1;
+
+    if (lineBytesSeen === 0 && !exceededLimit) {
+      resetRecord();
+
+      return null;
+    }
+
+    const resolvedDecision = resolveDecision();
+
+    if (resolvedDecision.kind === "skip") {
+      if (lineBytesSeen > maxRecordBytes) {
+        options.onSkippedOversizedRecord?.({
+          lineNumber,
+          byteLength: lineBytesSeen,
+        });
+      }
+
+      resetRecord();
+
+      return null;
+    }
+
+    if (resolvedDecision.kind === "unknown") {
+      resetRecord();
+
+      return null;
+    }
+
+    if (lineBytesSeen > maxRecordBytes || exceededLimit) {
+      throw new Error(
+        oversizedErrorMessage({
+          filePath,
+          lineNumber,
+          maxRecordBytes,
+          envVarName: MAX_JSONL_RECORD_BYTES_ENV,
+        }),
+      );
+    }
+
+    const rawLine = Buffer.concat(retainedChunks, retainedBytes)
+      .toString("utf8")
+      .trim();
+
+    if (rawLine === "") {
+      resetRecord();
+
+      return null;
+    }
+
+    const record: JsonlRecord<TClassification> = {
+      lineNumber,
+      rawLine,
+      byteLength: lineBytesSeen,
+      classification: resolvedDecision.classification,
+    };
+
+    resetRecord();
+
+    return record;
+  };
+
+  for await (const chunk of stream) {
+    let start = 0;
+
+    for (let index = 0; index < chunk.length; index += 1) {
+      if (chunk[index] !== 0x0a) {
+        continue;
+      }
+
+      appendSegment(chunk.subarray(start, index));
+      const record = finalizeRecord();
+
+      if (record) {
+        yield record;
+      }
+
+      start = index + 1;
+    }
+
+    appendSegment(chunk.subarray(start));
+  }
+
+  if (lineBytesSeen > 0) {
+    const record = finalizeRecord();
+
+    if (record) {
+      yield record;
+    }
+  }
+}
+
+export async function* readJsonLines<T>(filePath: string): AsyncGenerator<T> {
+  for await (const record of readJsonlRecords(filePath)) {
+    try {
+      yield JSON.parse(record.rawLine) as T;
+    } catch {
+      // Preserve existing behavior for malformed JSONL records.
+    }
+  }
+}
+
+export async function readJsonDocument<T>(
+  filePath: string,
+  options: ReadJsonDocumentOptions = {},
+) {
+  const maxBytes =
+    options.maxBytes ??
+    getPositiveIntegerEnv(
+      MAX_JSONL_RECORD_BYTES_ENV,
+      DEFAULT_MAX_JSONL_RECORD_BYTES,
+    );
+  const oversizedErrorMessage =
+    options.oversizedErrorMessage ?? defaultOversizedJsonDocumentMessage;
+  const stream = createReadStream(filePath);
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  for await (const chunk of stream) {
+    totalBytes += chunk.length;
+
+    if (totalBytes > maxBytes) {
+      stream.destroy();
+
+      throw new Error(
+        oversizedErrorMessage({
+          filePath,
+          maxBytes,
+          envVarName: MAX_JSONL_RECORD_BYTES_ENV,
+        }),
+      );
+    }
+
+    chunks.push(chunk);
+  }
+
+  return parseJsonTextWithLimit<T>(
+    Buffer.concat(chunks, totalBytes).toString("utf8"),
+    filePath,
+    {
+      maxBytes,
+      oversizedErrorMessage: ({ sourceLabel, maxBytes, envVarName }) =>
+        oversizedErrorMessage({
+          filePath: sourceLabel,
+          maxBytes,
+          envVarName,
+        }),
+    },
+  );
+}
+
+export function parseJsonTextWithLimit<T>(
+  content: string,
+  sourceLabel: string,
+  options: ParseJsonTextOptions = {},
+) {
+  const maxBytes =
+    options.maxBytes ??
+    getPositiveIntegerEnv(
+      MAX_JSONL_RECORD_BYTES_ENV,
+      DEFAULT_MAX_JSONL_RECORD_BYTES,
+    );
+  const oversizedErrorMessage =
+    options.oversizedErrorMessage ?? defaultOversizedJsonTextMessage;
+
+  if (Buffer.byteLength(content, "utf8") > maxBytes) {
+    throw new Error(
+      oversizedErrorMessage({
+        sourceLabel,
+        maxBytes,
+        envVarName: MAX_JSONL_RECORD_BYTES_ENV,
+      }),
+    );
+  }
+
+  return JSON.parse(content) as T;
+}
+
+export function getPositiveIntegerEnv(name: string, fallback: number) {
+  const raw = process.env[name]?.trim();
+
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+export async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+) {
+  if (items.length === 0) {
+    return;
+  }
+
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  let nextIndex = 0;
+
+  await Promise.all(
+    Array.from({ length: limit }, async () => {
+      for (;;) {
+        const currentIndex = nextIndex;
+
+        nextIndex += 1;
+
+        if (currentIndex >= items.length) {
+          return;
+        }
+
+        await worker(items[currentIndex], currentIndex);
+      }
+    }),
+  );
 }
 
 export async function forEachJsonLine<T>(

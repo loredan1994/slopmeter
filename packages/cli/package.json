@@ -1,6 +1,6 @@
 {
   "name": "slopmeter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "CLI for generating yearly usage heatmaps for Claude Code, Codex, and Open Code.",
   "type": "module",
   "engines": {
@@ -35,6 +35,7 @@
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsup",
+    "test": "tsup && tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun run build",
     "start": "node dist/cli.js",

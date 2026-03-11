@@ -243,8 +243,9 @@ function getDateWindow({
 
 function printProviderAvailability(
   rowsByProvider: Record<ProviderId, UsageSummary | null>,
+  providers: ProviderId[],
 ) {
-  for (const provider of providerIds) {
+  for (const provider of providers) {
     const found = rowsByProvider[provider] ? "found" : "not found";
 
     process.stdout.write(`${providerStatusLabel[provider]} ${found}\n`);
@@ -527,14 +528,26 @@ async function main() {
     });
     const colorMode: ColorMode = values.dark ? "dark" : "light";
     const format = inferFormat(values.format, values.output);
-    const rowsByProvider = await aggregateUsage({ start, end });
+    const requestedProviders = getRequestedProviders(values);
+    const inspectedProviders =
+      requestedProviders.length > 0 ? requestedProviders : providerIds;
+    const { rowsByProvider, warnings } = await aggregateUsage({
+      start,
+      end,
+      requestedProviders,
+    });
 
     spinner.stop();
-    printProviderAvailability(rowsByProvider);
+
+    for (const warning of warnings) {
+      process.stderr.write(`${warning}\n`);
+    }
+
+    printProviderAvailability(rowsByProvider, inspectedProviders);
 
     const exportProviders = selectProvidersToRender(
       rowsByProvider,
-      getRequestedProviders(values),
+      requestedProviders,
     );
     const pricingRequested = values.officialPricing || values.openaiPricing;
     const subscriptionPrice = pricingRequested

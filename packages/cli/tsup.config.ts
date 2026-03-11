@@ -6,6 +6,7 @@ export default defineConfig({
   target: "node22",
   platform: "node",
   noExternal: ["svg-builder"],
+  external: ["node:sqlite"],
   splitting: false,
   sourcemap: true,
   clean: true,

@@ -1,4 +1,4 @@
 {
   "extends": "../../tooling/typescript-config/node.json",
-  "include": ["src/**/*.ts", "tsup.config.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "tsup.config.ts"]
 }
