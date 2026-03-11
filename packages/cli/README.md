@@ -87,7 +87,7 @@ npx slopmeter --dark --format svg --output ./out/heatmap-dark.svg
 
 - Claude Code: `$CLAUDE_CONFIG_DIR/*/projects` or `~/.config/claude/projects`, `~/.claude/projects`
 - Codex: `$CODEX_HOME/sessions` or `~/.codex/sessions`
-- Open Code: `$OPENCODE_DATA_DIR/storage/message` or `~/.local/share/opencode/storage/message`
+- Open Code: prefers `$OPENCODE_DATA_DIR/opencode.db` or `~/.local/share/opencode/opencode.db`, and falls back to `$OPENCODE_DATA_DIR/storage/message` or `~/.local/share/opencode/storage/message`
 
 ## Exit behavior
 
@@ -98,14 +98,16 @@ npx slopmeter --dark --format svg --output ./out/heatmap-dark.svg
 ## Environment variables
 
 - `SLOPMETER_FILE_PROCESS_CONCURRENCY`: positive integer file-processing limit for Claude Code and Codex JSONL files. Default: `4`.
-- `SLOPMETER_MAX_JSONL_RECORD_BYTES`: byte cap for Claude Code and Codex JSONL records and OpenCode JSON documents. Default: `67108864` (`64 MB`).
+- `SLOPMETER_MAX_JSONL_RECORD_BYTES`: byte cap for Claude Code and Codex JSONL records, OpenCode JSON documents, and OpenCode SQLite `message.data` payloads. Default: `67108864` (`64 MB`).
 
 ## JSONL record handling
 
 - Claude Code and Codex JSONL files are streamed through the same bounded record splitter; `slopmeter` does not materialize whole files in memory.
 - Oversized Claude Code JSONL records fail the file with a clear error that names the file, line number, byte cap, and `SLOPMETER_MAX_JSONL_RECORD_BYTES`.
-- OpenCode JSON message files are read through a bounded JSON document reader before `JSON.parse`.
-- Oversized OpenCode JSON documents fail the file with a clear error that names the file, byte cap, and `SLOPMETER_MAX_JSONL_RECORD_BYTES`.
+- OpenCode prefers the current SQLite store (`opencode.db`) and falls back to the legacy file-backed message layout.
+- OpenCode legacy JSON message files are read through a bounded JSON document reader before `JSON.parse`.
+- OpenCode SQLite `message.data` payloads use the same byte cap before `JSON.parse`.
+- Oversized OpenCode JSON documents and SQLite message payloads fail clearly with the source path or row label, byte cap, and `SLOPMETER_MAX_JSONL_RECORD_BYTES`.
 - Only Codex `turn_context` and `event_msg` `token_count` records are parsed for usage aggregation.
 - Oversized irrelevant Codex records are skipped and reported in a warning summary.
 - Oversized relevant Codex records fail the file with a clear error that names the file, line number, byte cap, and `SLOPMETER_MAX_JSONL_RECORD_BYTES`.

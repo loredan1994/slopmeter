@@ -101,14 +101,15 @@ Model names are normalized to remove a trailing date suffix like `-20251101`.
 ## Environment knobs
 
 - `SLOPMETER_FILE_PROCESS_CONCURRENCY`: positive integer file-processing limit for Claude Code and Codex JSONL files. Default: `4`.
-- `SLOPMETER_MAX_JSONL_RECORD_BYTES`: byte cap for Claude Code and Codex JSONL records and OpenCode JSON documents. Default: `67108864` (`64 MB`).
+- `SLOPMETER_MAX_JSONL_RECORD_BYTES`: byte cap for Claude Code and Codex JSONL records, OpenCode JSON documents, and OpenCode SQLite `message.data` payloads. Default: `67108864` (`64 MB`).
 
 ## JSONL oversized-record behavior
 
 - Claude Code and Codex now share the same bounded JSONL record splitter and do not materialize whole files in memory.
 - Oversized Claude Code JSONL records fail the affected file with a clear error that names the file, line number, byte cap, and `SLOPMETER_MAX_JSONL_RECORD_BYTES`.
-- OpenCode JSON message files now use a bounded JSON document reader before `JSON.parse`.
-- Oversized OpenCode JSON documents fail the affected file with a clear error that names the file, byte cap, and `SLOPMETER_MAX_JSONL_RECORD_BYTES`.
+- OpenCode legacy JSON message files use a bounded JSON document reader before `JSON.parse`.
+- OpenCode SQLite `message.data` payloads use the same byte cap before `JSON.parse`.
+- Oversized OpenCode JSON documents and SQLite message payloads fail clearly with the source path or row label, byte cap, and `SLOPMETER_MAX_JSONL_RECORD_BYTES`.
 - Codex now streams JSONL records and only parses records that affect usage aggregation.
 - Oversized irrelevant Codex records are skipped and summarized with a warning after processing.
 - Oversized relevant Codex records fail the affected file with a clear error that names the file, line number, byte cap, and `SLOPMETER_MAX_JSONL_RECORD_BYTES`.
@@ -117,4 +118,4 @@ Model names are normalized to remove a trailing date suffix like `-20251101`.
 
 - Claude Code: `$CLAUDE_CONFIG_DIR/*/projects` (comma-separated dirs) or defaults `~/.config/claude/projects` and `~/.claude/projects`
 - Codex: `$CODEX_HOME/sessions` or `~/.codex/sessions`
-- Open Code: `$OPENCODE_DATA_DIR/storage/message` or `~/.local/share/opencode/storage/message`
+- Open Code: prefers `$OPENCODE_DATA_DIR/opencode.db` or `~/.local/share/opencode/opencode.db`, and falls back to `$OPENCODE_DATA_DIR/storage/message` or `~/.local/share/opencode/storage/message`

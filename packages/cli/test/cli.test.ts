@@ -6,6 +6,9 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 const cliPath = resolve(import.meta.dirname, "../dist/cli.js");
+const cliRuntime = process.release.name === "node"
+  ? process.execPath
+  : "node";
 
 function createTempWorkspace(label: string) {
   return mkdtempSync(join(tmpdir(), `slopmeter-${label}-`));
@@ -120,6 +123,7 @@ function claudeEntry(options: {
 
 function openCodeMessage(options: {
   id?: string;
+  role?: string;
   modelID?: string;
   created?: number;
   input?: number;
@@ -129,6 +133,7 @@ function openCodeMessage(options: {
 }) {
   const {
     id = "msg-1",
+    role = "assistant",
     modelID = "gpt-5.4",
     created = Date.now(),
     input = 6,
@@ -139,6 +144,7 @@ function openCodeMessage(options: {
 
   return JSON.stringify({
     id,
+    role,
     modelID,
     providerID: "openai",
     time: { created, completed: created + 1_000 },
@@ -155,6 +161,43 @@ function openCodeMessage(options: {
   });
 }
 
+async function createOpenCodeDb(
+  rootDir: string,
+  rows: Array<{ id: string; created?: number; data: string }>,
+) {
+  const { DatabaseSync } = await import("node:sqlite");
+  const databasePath = join(rootDir, "opencode.db");
+
+  ensureParent(databasePath);
+
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    database.exec(`
+      CREATE TABLE message (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        time_created INTEGER NOT NULL,
+        time_updated INTEGER NOT NULL,
+        data TEXT NOT NULL
+      )
+    `);
+
+    const insert = database.prepare(`
+      INSERT INTO message (id, session_id, time_created, time_updated, data)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    for (const row of rows) {
+      const created = row.created ?? Date.now();
+
+      insert.run(row.id, "ses-1", created, created, row.data);
+    }
+  } finally {
+    database.close();
+  }
+}
+
 async function runCli(
   args: string[],
   extraEnv: Record<string, string>,
@@ -164,11 +207,12 @@ async function runCli(
     stdout: string;
     stderr: string;
   }>((resolveRun, reject) => {
-    const child = spawn(process.execPath, [cliPath, ...args], {
+    const child = spawn(cliRuntime, [cliPath, ...args], {
       env: {
         ...process.env,
         ...extraEnv,
         FORCE_COLOR: "0",
+        NODE_NO_WARNINGS: "1",
         NO_COLOR: "1",
         TERM: "dumb",
       },
@@ -443,6 +487,54 @@ test("OpenCode reads the legacy file-backed message layout", async (t) => {
   assert.equal(payload.providers[0]?.daily[0]?.total, 15);
 });
 
+test("OpenCode prefers the SQLite message store when opencode.db exists", async (t) => {
+  const workspace = createTempWorkspace("opencode-db");
+
+  t.after(() => {
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  const openCodeDir = join(workspace, "opencode");
+  const outputPath = join(workspace, "out.json");
+
+  await createOpenCodeDb(openCodeDir, [
+    {
+      id: "msg-db-1",
+      data: openCodeMessage({
+        id: "msg-db-1",
+        modelID: "gpt-5.4",
+        input: 8,
+        output: 5,
+        cacheRead: 2,
+      }),
+    },
+  ]);
+  writeJsonFile(
+    join(openCodeDir, "storage", "message", "bad.json"),
+    "{ this is not valid json",
+  );
+
+  const result = await runCli(
+    ["--opencode", "--format", "json", "--output", outputPath],
+    {
+      OPENCODE_DATA_DIR: openCodeDir,
+    },
+  );
+
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /Open Code found/);
+
+  const payload = JSON.parse(readFileSync(outputPath, "utf8")) as {
+    providers: Array<{ provider: string; daily: Array<{ total: number }> }>;
+  };
+
+  assert.deepEqual(
+    payload.providers.map((provider) => provider.provider),
+    ["opencode"],
+  );
+  assert.equal(payload.providers[0]?.daily[0]?.total, 15);
+});
+
 test("OpenCode fails clearly on oversized JSON documents", async (t) => {
   const workspace = createTempWorkspace("opencode-oversized");
 
@@ -480,5 +572,40 @@ test("OpenCode fails clearly on oversized JSON documents", async (t) => {
     result.stderr,
     new RegExp(oversizedFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
   );
+  assert.match(result.stderr, /SLOPMETER_MAX_JSONL_RECORD_BYTES/);
+});
+
+test("OpenCode fails clearly on oversized SQLite message payloads", async (t) => {
+  const workspace = createTempWorkspace("opencode-db-oversized");
+
+  t.after(() => {
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  const openCodeDir = join(workspace, "opencode");
+
+  await createOpenCodeDb(openCodeDir, [
+    {
+      id: "msg-db-oversized",
+      data: `${openCodeMessage({
+        id: "msg-db-oversized",
+        input: 1,
+        output: 1,
+      }).slice(0, -1)},"padding":"${"x".repeat(1024)}"}`,
+    },
+  ]);
+
+  const result = await runCli(
+    ["--opencode", "--format", "json", "--output", join(workspace, "out.json")],
+    {
+      OPENCODE_DATA_DIR: openCodeDir,
+      SLOPMETER_MAX_JSONL_RECORD_BYTES: "256",
+      NODE_NO_WARNINGS: "1",
+    },
+  );
+
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /JSON payload exceeds 256 bytes/);
+  assert.match(result.stderr, /opencode\.db:message:msg-db-oversized/);
   assert.match(result.stderr, /SLOPMETER_MAX_JSONL_RECORD_BYTES/);
 });
