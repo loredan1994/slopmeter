@@ -1,5 +1,10 @@
 import svgBuilder, { type SVGBuilderInstance } from "svg-builder";
-import type { DailyUsage, Insights, ModelUsage } from "./interfaces";
+import type {
+  DailyUsage,
+  Insights,
+  ModelUsage,
+  ProviderPricingSummary,
+} from "./interfaces";
 import type { ProviderId } from "./lib/interfaces";
 import { formatLocalDate } from "./lib/utils";
 
@@ -32,6 +37,15 @@ interface SectionLayout {
   legendY: number;
   footerCaptionY: number;
   footerValueY: number;
+  leaderboardTitleY: number;
+  leaderboardRowStartY: number;
+  leaderboardRowGap: number;
+  pricingSummaryTitleY: number;
+  pricingMetricCaptionY: number;
+  pricingMetricValueY: number;
+  pricingDriversTitleY: number;
+  pricingRowStartY: number;
+  pricingNoteY: number;
 }
 
 interface DrawHeatmapSectionOptions {
@@ -41,6 +55,7 @@ interface DrawHeatmapSectionOptions {
   layout: SectionLayout;
   daily: DailyUsage[];
   insights?: Insights;
+  pricing?: ProviderPricingSummary;
   title: string;
   colors: HeatmapTheme["colors"];
   colorMode: ColorMode;
@@ -50,6 +65,7 @@ interface DrawHeatmapSectionOptions {
 interface RenderUsageHeatmapsSvgSection {
   daily: DailyUsage[];
   insights?: Insights;
+  pricing?: ProviderPricingSummary;
   title: string;
   colors: HeatmapTheme["colors"];
 }
@@ -140,6 +156,11 @@ const providerTitleFontSize = 20;
 const metricCaptionFontSize = 9;
 const metricValueFontSize = 14;
 const captionValueGap = 4;
+const leaderboardRowFontSize = 12;
+const leaderboardRowGap = 18;
+const leaderboardMaxRows = 5;
+const pricingMaxRows = 5;
+const minSectionWidth = 760;
 
 const surfacePalettes: Record<ColorMode, SurfacePalette> = {
   light: {
@@ -176,6 +197,42 @@ function formatTokenTotal(value: number) {
   }
 
   return numberFormatter.format(value);
+}
+
+function formatPercent(value: number, total: number) {
+  if (total <= 0) {
+    return "0%";
+  }
+
+  const share = (value / total) * 100;
+  const precision = share >= 10 ? 0 : 1;
+
+  return `${share.toFixed(precision)}%`;
+}
+
+function formatUsdCompact(value: number) {
+  const absolute = Math.abs(value);
+  const prefix = value < 0 ? "-$" : "$";
+  const units = [
+    { size: 1_000_000_000, suffix: "B" },
+    { size: 1_000_000, suffix: "M" },
+    { size: 1_000, suffix: "K" },
+  ];
+
+  for (const unit of units) {
+    if (absolute >= unit.size) {
+      const scaled = absolute / unit.size;
+      const precision = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+      const compact = scaled
+        .toFixed(precision)
+        .replace(/\.0+$/, "")
+        .replace(/(\.\d*[1-9])0+$/, "$1");
+
+      return `${prefix}${compact}${unit.suffix}`;
+    }
+  }
+
+  return `${prefix}${absolute.toFixed(2)}`;
 }
 
 function truncateText(value: string, maxLength: number) {
@@ -269,14 +326,13 @@ function getCalendarGrid(startDate: Date, endDate: Date) {
   return { weeks, monthLabels };
 }
 
-function getSectionLayout(weekCount: number) {
+function getSectionLayout(weekCount: number, includePricing: boolean) {
   const cellSize = 11;
   const gap = 2;
   const leftLabelWidth = 34;
   const rightPadding = 20;
   const headerCaptionY = 0;
-  const headerValueY =
-    headerCaptionY + metricCaptionFontSize + captionValueGap;
+  const headerValueY = headerCaptionY + metricCaptionFontSize + captionValueGap;
   const topMetricHeight = headerValueY + metricValueFontSize;
   const topPadding = Math.max(providerTitleFontSize, topMetricHeight) + 20;
   const monthHeaderHeight = 20;
@@ -289,11 +345,31 @@ function getSectionLayout(weekCount: number) {
   const legendBottomY = legendY + cellSize;
   const footerTopPadding = 32;
   const footerCaptionY = legendBottomY + footerTopPadding;
-  const footerValueY =
-    footerCaptionY + metricCaptionFontSize + captionValueGap;
-  const statsBottomPadding = 12;
-  const width = leftLabelWidth + gridWidth + rightPadding;
-  const height = footerValueY + metricValueFontSize + statsBottomPadding;
+  const footerValueY = footerCaptionY + metricCaptionFontSize + captionValueGap;
+  const leaderboardTitleY = footerValueY + metricValueFontSize + 24;
+  const leaderboardRowStartY =
+    leaderboardTitleY + metricCaptionFontSize + captionValueGap + 6;
+  const leaderboardHeight =
+    Math.max(leaderboardMaxRows - 1, 0) * leaderboardRowGap +
+    leaderboardRowFontSize;
+  const pricingSummaryTitleY = leaderboardRowStartY + leaderboardHeight + 26;
+  const pricingMetricCaptionY = pricingSummaryTitleY + 18;
+  const pricingMetricValueY =
+    pricingMetricCaptionY + metricCaptionFontSize + captionValueGap;
+  const pricingDriversTitleY = pricingMetricValueY + metricValueFontSize + 24;
+  const pricingRowStartY =
+    pricingDriversTitleY + metricCaptionFontSize + captionValueGap + 6;
+  const pricingRowsHeight =
+    Math.max(pricingMaxRows - 1, 0) * leaderboardRowGap +
+    leaderboardRowFontSize;
+  const pricingNoteY = pricingRowStartY + pricingRowsHeight + 12;
+  const statsBottomPadding = 16;
+  const width = Math.max(leftLabelWidth + gridWidth + rightPadding, minSectionWidth);
+  const baseHeight =
+    leaderboardRowStartY + leaderboardHeight + statsBottomPadding;
+  const pricingHeight =
+    pricingNoteY + leaderboardRowFontSize + 12 + statsBottomPadding;
+  const height = includePricing ? pricingHeight : baseHeight;
 
   return {
     width,
@@ -309,6 +385,15 @@ function getSectionLayout(weekCount: number) {
     legendY,
     footerCaptionY,
     footerValueY,
+    leaderboardTitleY,
+    leaderboardRowStartY,
+    leaderboardRowGap,
+    pricingSummaryTitleY,
+    pricingMetricCaptionY,
+    pricingMetricValueY,
+    pricingDriversTitleY,
+    pricingRowStartY,
+    pricingNoteY,
   };
 }
 
@@ -321,6 +406,7 @@ function drawHeatmapSection(
     layout,
     daily,
     insights,
+    pricing,
     title,
     colors,
     colorMode,
@@ -345,7 +431,6 @@ function drawHeatmapSection(
   }
 
   const topMetricGap = 120;
-  const headerLast30DaysX = rightEdge - topMetricGap * 3;
   const headerInputX = rightEdge - topMetricGap * 2;
   const headerOutputX = rightEdge - topMetricGap;
   const totalTokensLabel = formatTokenTotal(totalTokens);
@@ -571,6 +656,7 @@ function drawHeatmapSection(
   const rightColumnX = rightEdge;
   const leftSecondaryX = leftColumnX + 250;
   const rightPrimaryX = rightColumnX - 160;
+  const topModels = insights?.topModels ?? [];
 
   const leftRows: ModelUsageRow[] = [];
 
@@ -672,6 +758,265 @@ function drawHeatmapSection(
     `${numberFormatter.format(currentStreak)} days`,
   );
 
+  svg = svg.text(
+    {
+      x: leftColumnX,
+      y: y + layout.leaderboardTitleY,
+      fill: palette.muted,
+      "font-size": metricCaptionFontSize,
+      "font-weight": 600,
+      "dominant-baseline": "hanging",
+      "font-family": fontFamily,
+    },
+    caption("Top models"),
+  );
+
+  if (topModels.length === 0) {
+    svg = svg.text(
+      {
+        x: leftColumnX,
+        y: y + layout.leaderboardRowStartY,
+        fill: palette.muted,
+        "font-size": leaderboardRowFontSize,
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      "No model data available",
+    );
+
+    return svg;
+  }
+
+  for (const [index, model] of topModels.entries()) {
+    const rowY =
+      y + layout.leaderboardRowStartY + index * layout.leaderboardRowGap;
+    const modelLabel = truncateText(model.name, 42);
+    const tokenLabel = `${formatTokenTotal(model.tokens.total)} (${formatPercent(model.tokens.total, totalTokens)})`;
+
+    svg = svg.text(
+      {
+        x: leftColumnX,
+        y: rowY,
+        fill: palette.muted,
+        "font-size": leaderboardRowFontSize,
+        "font-weight": 600,
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      `${index + 1}.`,
+    );
+
+    svg = svg.text(
+      {
+        x: leftColumnX + 22,
+        y: rowY,
+        fill: palette.text,
+        "font-size": leaderboardRowFontSize,
+        "font-weight": 500,
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      modelLabel,
+    );
+
+    svg = svg.text(
+      {
+        x: rightEdge,
+        y: rowY,
+        fill: palette.muted,
+        "font-size": leaderboardRowFontSize,
+        "text-anchor": "end",
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      tokenLabel,
+    );
+  }
+
+  if (!pricing) {
+    return svg;
+  }
+
+  const pricingCaption = `Same usage, two billing paths (${pricing.source.mode})`;
+  const apiEstimate = pricing.totals.estimatedCost.total;
+  const subscriptionEstimate =
+    pricing.subscriptionComparison.totalSubscriptionCost;
+  const difference = pricing.subscriptionComparison.difference;
+  const costDrivers = pricing.models.slice(0, pricingMaxRows);
+  const comparisonLabel =
+    pricing.subscriptionComparison.cheaperOption === "subscription"
+      ? "Sub savings"
+      : pricing.subscriptionComparison.cheaperOption === "api"
+        ? "API savings"
+        : "No difference";
+  const comparisonValue =
+    pricing.subscriptionComparison.cheaperOption === "equal"
+      ? "$0.00"
+      : formatUsdCompact(Math.abs(difference));
+  const summaryColumns = [
+    {
+      label: "API-key route",
+      value: formatUsdCompact(apiEstimate),
+      x: leftColumnX,
+      anchor: "start" as const,
+    },
+    {
+      label: "Sub route",
+      value: formatUsdCompact(subscriptionEstimate),
+      x: x + layout.width / 2,
+      anchor: "middle" as const,
+    },
+    {
+      label: comparisonLabel,
+      value: comparisonValue,
+      x: rightEdge,
+      anchor: "end" as const,
+    },
+  ];
+
+  svg = svg.text(
+    {
+      x: leftColumnX,
+      y: y + layout.pricingSummaryTitleY,
+      fill: palette.muted,
+      "font-size": metricCaptionFontSize,
+      "font-weight": 600,
+      "dominant-baseline": "hanging",
+      "font-family": fontFamily,
+    },
+    caption(pricingCaption),
+  );
+
+  for (const column of summaryColumns) {
+    svg = svg.text(
+      {
+        x: column.x,
+        y: y + layout.pricingMetricCaptionY,
+        fill: palette.muted,
+        "font-size": metricCaptionFontSize,
+        "font-weight": 600,
+        "text-anchor": column.anchor,
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      caption(column.label),
+    );
+
+    svg = svg.text(
+      {
+        x: column.x,
+        y: y + layout.pricingMetricValueY,
+        fill: palette.text,
+        "font-size": metricValueFontSize,
+        "font-weight": 600,
+        "text-anchor": column.anchor,
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      column.value,
+    );
+  }
+
+  svg = svg.text(
+    {
+      x: leftColumnX,
+      y: y + layout.pricingDriversTitleY,
+      fill: palette.muted,
+      "font-size": metricCaptionFontSize,
+      "font-weight": 600,
+      "dominant-baseline": "hanging",
+      "font-family": fontFamily,
+    },
+    caption("Largest API-key cost drivers"),
+  );
+
+  if (costDrivers.length === 0) {
+    svg = svg.text(
+      {
+        x: leftColumnX,
+        y: y + layout.pricingRowStartY,
+        fill: palette.muted,
+        "font-size": leaderboardRowFontSize,
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      "No priced models available",
+    );
+
+    return svg;
+  }
+
+  for (const [index, model] of costDrivers.entries()) {
+    const rowY = y + layout.pricingRowStartY + index * layout.leaderboardRowGap;
+    const modelLabel = truncateText(model.model, 42);
+    const costLabel = `${formatUsdCompact(model.estimatedCost.total)} (${formatPercent(model.estimatedCost.total, apiEstimate)})`;
+
+    svg = svg.text(
+      {
+        x: leftColumnX,
+        y: rowY,
+        fill: palette.muted,
+        "font-size": leaderboardRowFontSize,
+        "font-weight": 600,
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      `${index + 1}.`,
+    );
+
+    svg = svg.text(
+      {
+        x: leftColumnX + 22,
+        y: rowY,
+        fill: palette.text,
+        "font-size": leaderboardRowFontSize,
+        "font-weight": 500,
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      modelLabel,
+    );
+
+    svg = svg.text(
+      {
+        x: rightEdge,
+        y: rowY,
+        fill: palette.muted,
+        "font-size": leaderboardRowFontSize,
+        "text-anchor": "end",
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      costLabel,
+    );
+  }
+
+  const pricingNotes = [
+    "Same logged usage, priced as either API keys or one fixed monthly subscription.",
+  ];
+
+  if (pricing.unresolvedModels.length > 0) {
+    pricingNotes.push(
+      `Excluded from API-key total: ${pricing.unresolvedModels
+        .map((model) => model.model)
+        .join(", ")}`,
+    );
+  }
+
+  for (const [index, note] of pricingNotes.entries()) {
+    svg = svg.text(
+      {
+        x: leftColumnX,
+        y: y + layout.pricingNoteY + index * 12,
+        fill: palette.muted,
+        "font-size": 10,
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      truncateText(note, 96),
+    );
+  }
+
   return svg;
 }
 
@@ -682,7 +1027,10 @@ export function renderUsageHeatmapsSvg({
   colorMode,
 }: RenderUsageHeatmapsSvgOptions) {
   const grid = getCalendarGrid(startDate, endDate);
-  const layout = getSectionLayout(grid.weeks.length);
+  const layout = getSectionLayout(
+    grid.weeks.length,
+    sections.some((section) => Boolean(section.pricing)),
+  );
   const palette = surfacePalettes[colorMode];
   const horizontalPadding = 18;
   const topPadding = 30;
@@ -719,6 +1067,7 @@ export function renderUsageHeatmapsSvg({
       layout,
       daily: section.daily,
       insights: section.insights,
+      pricing: section.pricing,
       title: section.title,
       colors: section.colors,
       colorMode,

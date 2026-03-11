@@ -20,15 +20,21 @@ export async function aggregateUsage({
   start,
   end,
 }: AggregateUsageOptions): Promise<Record<ProviderId, UsageSummary | null>> {
-  const [claude, codex, opencode] = await Promise.all([
-    loadClaudeRows(start, end),
-    loadCodexRows(start, end),
-    loadOpenCodeRows(start, end),
-  ]);
-
-  return {
-    claude: hasUsage(claude) ? claude : null,
-    codex: hasUsage(codex) ? codex : null,
-    opencode: hasUsage(opencode) ? opencode : null,
+  const loaders: Record<
+    ProviderId,
+    (startDate: Date, endDate: Date) => Promise<UsageSummary>
+  > = {
+    claude: loadClaudeRows,
+    codex: loadCodexRows,
+    opencode: loadOpenCodeRows,
   };
+  const summaries = {} as Record<ProviderId, UsageSummary | null>;
+
+  for (const provider of providerIds) {
+    const summary = await loaders[provider](start, end);
+
+    summaries[provider] = hasUsage(summary) ? summary : null;
+  }
+
+  return summaries;
 }

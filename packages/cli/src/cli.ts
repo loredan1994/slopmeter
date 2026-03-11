@@ -7,41 +7,64 @@ import sharp from "sharp";
 import { heatmapThemes, renderUsageHeatmapsSvg, type ColorMode } from "./graph";
 import type {
   JsonExportPayload,
+  OpenAIPricingMode,
   JsonUsageSummary,
   UsageSummary,
 } from "./interfaces";
+import { estimateOpenAICosts } from "./lib/openai-pricing";
 import type { ProviderId } from "./providers";
 import { formatLocalDate } from "./lib/utils";
 import { aggregateUsage, providerIds, providerStatusLabel } from "./providers";
 
 type OutputFormat = "png" | "svg" | "json";
+const currencyFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+const compactFormatter = new Intl.NumberFormat("en-US", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
 interface CliArgValues {
   output?: string;
   format?: string;
+  pricingMode?: string;
+  subscriptionPrice?: string;
+  since?: string;
+  until?: string;
   help: boolean;
   dark: boolean;
   claude: boolean;
   codex: boolean;
   opencode: boolean;
+  openaiPricing: boolean;
 }
 
 const PNG_BASE_WIDTH = 1000;
 const PNG_SCALE = 4;
 const PNG_RENDER_WIDTH = PNG_BASE_WIDTH * PNG_SCALE;
-const JSON_EXPORT_VERSION = "2026-03-03";
+const JSON_EXPORT_VERSION = "2026-03-11";
 
 const HELP_TEXT = `slopmeter
 
-Generate rolling 1-year usage heatmap image(s) (today is the latest day).
+Generate usage heatmap image(s), optionally limited to a custom date window.
 
 Usage:
-  slopmeter [--claude] [--codex] [--opencode] [--dark] [--format png|svg|json] [--output ./heatmap-last-year.png]
+  slopmeter [--claude] [--codex] [--opencode] [--dark] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--format png|svg|json] [--output ./heatmap.png] [--openai-pricing]
 
 Options:
   --claude                    Render Claude Code graph
   --codex                     Render Codex graph
   --opencode                  Render Open Code graph
   --dark                      Render with the dark theme
+  --since                     Start date in YYYY-MM-DD (default: 1 year before end date)
+  --until                     End date in YYYY-MM-DD (default: today)
+  --openai-pricing            Fetch official OpenAI API pricing and compare API-key cost against a fixed monthly subscription
+  --pricing-mode              OpenAI pricing mode: standard, batch, flex, or priority (default: standard)
+  --subscription-price        Monthly subscription reference price in USD (default: 200)
   -f, --format                Output format: png, svg, or json (default: png)
   -o, --output                Output file path (default: ./heatmap-last-year.png)
   -h, --help                  Show this help
@@ -57,11 +80,16 @@ function validateArgs(values: unknown): asserts values is CliArgValues {
     ow.object.exactShape({
       output: ow.optional.string.nonEmpty,
       format: ow.optional.string.nonEmpty,
+      pricingMode: ow.optional.string.nonEmpty,
+      subscriptionPrice: ow.optional.string.nonEmpty,
+      since: ow.optional.string.nonEmpty,
+      until: ow.optional.string.nonEmpty,
       help: ow.boolean,
       dark: ow.boolean,
       claude: ow.boolean,
       codex: ow.boolean,
       opencode: ow.boolean,
+      openaiPricing: ow.boolean,
     }),
   );
 }
@@ -120,6 +148,7 @@ function toJsonUsageSummary(summary: UsageSummary): JsonUsageSummary {
   return {
     provider: summary.provider,
     insights: summary.insights,
+    pricing: summary.pricing,
     daily: summary.daily.map((row) => ({
       date: formatLocalDate(row.date),
       input: row.input,
@@ -131,13 +160,70 @@ function toJsonUsageSummary(summary: UsageSummary): JsonUsageSummary {
   };
 }
 
-function getDateWindow() {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setFullYear(start.getFullYear() - 1);
+function parseDateArg(
+  value: string | undefined,
+  boundary: "start" | "end",
+): Date | null {
+  if (!value) {
+    return null;
+  }
 
-  const end = new Date();
-  end.setHours(23, 59, 59, 999);
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (!match) {
+    throw new Error(
+      `${boundary === "start" ? "--since" : "--until"} must be in YYYY-MM-DD format.`,
+    );
+  }
+
+  const [, yearRaw, monthRaw, dayRaw] = match;
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  const date = new Date(year, month - 1, day);
+
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    throw new Error(
+      `${boundary === "start" ? "--since" : "--until"} must be a valid calendar date.`,
+    );
+  }
+
+  if (boundary === "start") {
+    date.setHours(0, 0, 0, 0);
+  } else {
+    date.setHours(23, 59, 59, 999);
+  }
+
+  return date;
+}
+
+function getDateWindow({
+  since,
+  until,
+}: {
+  since?: string;
+  until?: string;
+}) {
+  const end = parseDateArg(until, "end") ?? new Date();
+
+  if (!until) {
+    end.setHours(23, 59, 59, 999);
+  }
+
+  const start = parseDateArg(since, "start") ?? new Date(end);
+
+  if (!since) {
+    start.setFullYear(start.getFullYear() - 1);
+    start.setHours(0, 0, 0, 0);
+  }
+
+  if (start > end) {
+    throw new Error("--since must be on or before --until.");
+  }
 
   return { start, end };
 }
@@ -182,6 +268,163 @@ function selectProvidersToRender(
   return providersToRender.map((provider) => rowsByProvider[provider]!);
 }
 
+function inferPricingMode(value: string | undefined): OpenAIPricingMode {
+  const normalized = value ?? "standard";
+
+  ow(normalized, ow.string.oneOf(["batch", "flex", "standard", "priority"]));
+
+  return normalized as OpenAIPricingMode;
+}
+
+function parseSubscriptionPrice(value: string | undefined) {
+  const parsed = Number(value ?? "200");
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error("Subscription price must be a positive number.");
+  }
+
+  return parsed;
+}
+
+function formatCompactNumber(value: number) {
+  return compactFormatter.format(value);
+}
+
+function formatUsd(value: number) {
+  return currencyFormatter.format(value);
+}
+
+function truncate(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(maxLength - 3, 1))}...`;
+}
+
+function printOpenAIPricingReport(
+  providers: UsageSummary[],
+  subscriptionPrice: number,
+) {
+  const pricedProviders = providers.filter((provider) => provider.pricing);
+
+  if (pricedProviders.length === 0) {
+    return;
+  }
+
+  const combined = pricedProviders.reduce(
+    (accumulator, provider) => {
+      const pricing = provider.pricing!;
+
+      accumulator.apiCost += pricing.totals.estimatedCost.total;
+      accumulator.subscriptionCost +=
+        pricing.subscriptionComparison.totalSubscriptionCost;
+      accumulator.notes.push(...pricing.notes);
+
+      return accumulator;
+    },
+    {
+      apiCost: 0,
+      subscriptionCost: 0,
+      notes: [] as string[],
+    },
+  );
+
+  process.stdout.write("\nOpenAI pricing comparison for same usage\n");
+  process.stdout.write(
+    `Source: ${pricedProviders[0].pricing!.source.url} (${pricedProviders[0].pricing!.source.mode}, fetched ${pricedProviders[0].pricing!.source.retrievedAt})\n`,
+  );
+  process.stdout.write(
+    `Subscription reference: ${formatUsd(subscriptionPrice)}/month\n`,
+  );
+  process.stdout.write(
+    "Scenario: the same logged usage is priced two ways, once as API-key usage and once as a fixed monthly subscription.\n",
+  );
+
+  for (const provider of pricedProviders) {
+    const pricing = provider.pricing!;
+    const columns = {
+      model: 28,
+      input: 10,
+      cached: 10,
+      output: 10,
+      cost: 12,
+    };
+
+    process.stdout.write(`\n${heatmapThemes[provider.provider].title}\n`);
+    process.stdout.write(
+      `${"Model".padEnd(columns.model)}${"Input".padStart(columns.input)}${"Cached".padStart(columns.cached)}${"Output".padStart(columns.output)}${"API-key est.".padStart(columns.cost)}\n`,
+    );
+
+    for (const model of pricing.models) {
+      process.stdout.write(
+        `${truncate(model.model, columns.model).padEnd(columns.model)}${formatCompactNumber(model.tokens.input).padStart(columns.input)}${formatCompactNumber(model.tokens.cachedInput).padStart(columns.cached)}${formatCompactNumber(model.tokens.output).padStart(columns.output)}${formatUsd(model.estimatedCost.total).padStart(columns.cost)}\n`,
+      );
+    }
+
+    if (pricing.unresolvedModels.length > 0) {
+      process.stdout.write(
+        `Unresolved: ${pricing.unresolvedModels.map((model) => model.model).join(", ")}\n`,
+      );
+    }
+
+    process.stdout.write(
+      `Total if billed via API keys: ${formatUsd(pricing.totals.estimatedCost.total)}\n`,
+    );
+    process.stdout.write(
+      `Total if covered by subscription: ${formatUsd(pricing.subscriptionComparison.totalSubscriptionCost)} (${pricing.subscriptionComparison.months} months)\n`,
+    );
+    if (pricing.subscriptionComparison.cheaperOption === "subscription") {
+      process.stdout.write(
+        `Subscription savings vs API keys: ${formatUsd(pricing.subscriptionComparison.difference)}\n`,
+      );
+    } else if (pricing.subscriptionComparison.cheaperOption === "api") {
+      process.stdout.write(
+        `API-key savings vs subscription: ${formatUsd(Math.abs(pricing.subscriptionComparison.difference))}\n`,
+      );
+    } else {
+      process.stdout.write("No cost difference between the two routes.\n");
+    }
+  }
+
+  if (pricedProviders.length > 1) {
+    const combinedDifference = combined.apiCost - combined.subscriptionCost;
+    const cheaperOption =
+      combinedDifference > 0
+        ? "subscription"
+        : combinedDifference < 0
+          ? "api"
+          : "equal";
+
+    process.stdout.write("\nCombined total\n");
+    process.stdout.write(`Total if billed via API keys: ${formatUsd(combined.apiCost)}\n`);
+    process.stdout.write(
+      `Total if covered by subscription: ${formatUsd(combined.subscriptionCost)}\n`,
+    );
+    if (cheaperOption === "subscription") {
+      process.stdout.write(
+        `Subscription savings vs API keys: ${formatUsd(combinedDifference)}\n`,
+      );
+    } else if (cheaperOption === "api") {
+      process.stdout.write(
+        `API-key savings vs subscription: ${formatUsd(Math.abs(combinedDifference))}\n`,
+      );
+    } else {
+      process.stdout.write("No cost difference between the two routes.\n");
+    }
+  }
+
+  const notes = [...new Set(combined.notes)];
+
+  if (notes.length > 0) {
+    process.stdout.write("\nNotes\n");
+
+    for (const note of notes) {
+      process.stdout.write(`- ${note}\n`);
+    }
+  }
+}
+
 function printRunSummary(
   outputPath: string,
   format: OutputFormat,
@@ -213,18 +456,36 @@ async function main() {
     options: {
       output: { type: "string", short: "o" },
       format: { type: "string", short: "f" },
+      since: { type: "string" },
+      until: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
       dark: { type: "boolean", default: false },
       claude: { type: "boolean", default: false },
       codex: { type: "boolean", default: false },
       opencode: { type: "boolean", default: false },
+      "openai-pricing": { type: "boolean", default: false },
+      "pricing-mode": { type: "string" },
+      "subscription-price": { type: "string" },
     },
     allowPositionals: false,
   });
 
-  validateArgs(parsed.values);
+  const values: CliArgValues = {
+    output: parsed.values.output,
+    format: parsed.values.format,
+    pricingMode: parsed.values["pricing-mode"],
+    subscriptionPrice: parsed.values["subscription-price"],
+    since: parsed.values.since,
+    until: parsed.values.until,
+    help: parsed.values.help,
+    dark: parsed.values.dark,
+    claude: parsed.values.claude,
+    codex: parsed.values.codex,
+    opencode: parsed.values.opencode,
+    openaiPricing: parsed.values["openai-pricing"],
+  };
 
-  const { values } = parsed;
+  validateArgs(values);
 
   if (values.help) {
     printHelp();
@@ -238,7 +499,10 @@ async function main() {
       spinner: "dots",
     }).start();
 
-    const { start, end } = getDateWindow();
+    const { start, end } = getDateWindow({
+      since: values.since,
+      until: values.until,
+    });
     const colorMode: ColorMode = values.dark ? "dark" : "light";
     const format = inferFormat(values.format, values.output);
     const rowsByProvider = await aggregateUsage({ start, end });
@@ -250,6 +514,27 @@ async function main() {
       rowsByProvider,
       getRequestedProviders(values),
     );
+    const subscriptionPrice = values.openaiPricing
+      ? parseSubscriptionPrice(values.subscriptionPrice)
+      : null;
+
+    if (values.openaiPricing) {
+      const pricingMode = inferPricingMode(values.pricingMode);
+
+      spinner.start("Fetching OpenAI pricing...");
+
+      for (const provider of exportProviders) {
+        provider.pricing = await estimateOpenAICosts({
+          summary: provider,
+          mode: pricingMode,
+          subscriptionPrice: subscriptionPrice!,
+          startDate: start,
+          endDate: end,
+        });
+      }
+
+      spinner.stop();
+    }
 
     const outputPath = resolve(
       values.output ?? `./heatmap-last-year.${format}`,
@@ -278,12 +563,15 @@ async function main() {
         startDate: start,
         endDate: end,
         colorMode,
-        sections: exportProviders.map(({ provider, daily, insights }) => ({
-          daily,
-          insights,
-          title: heatmapThemes[provider].title,
-          colors: heatmapThemes[provider].colors,
-        })),
+        sections: exportProviders.map(
+          ({ provider, daily, insights, pricing }) => ({
+            daily,
+            insights,
+            pricing,
+            title: heatmapThemes[provider].title,
+            colors: heatmapThemes[provider].colors,
+          }),
+        ),
       });
       const background = colorMode === "dark" ? "#171717" : "#ffffff";
 
@@ -292,6 +580,10 @@ async function main() {
     }
 
     spinner.succeed("Analysis complete");
+
+    if (values.openaiPricing) {
+      printOpenAIPricingReport(exportProviders, subscriptionPrice!);
+    }
 
     printRunSummary(
       outputPath,

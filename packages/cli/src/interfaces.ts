@@ -2,6 +2,7 @@ export interface UsageSummary {
   provider: "claude" | "codex" | "opencode";
   daily: DailyUsage[];
   insights?: Insights;
+  pricing?: ProviderPricingSummary;
 }
 
 export interface DailyUsage {
@@ -33,6 +34,8 @@ export interface ModelUsage {
 export interface Insights {
   mostUsedModel?: ModelUsage;
   recentMostUsedModel?: ModelUsage;
+  topModels: ModelUsage[];
+  recentTopModels: ModelUsage[];
   streaks: {
     longest: number;
     current: number;
@@ -50,6 +53,7 @@ export interface JsonUsageSummary {
   provider: "claude" | "codex" | "opencode";
   daily: JsonDailyUsage[];
   insights?: Insights;
+  pricing?: ProviderPricingSummary;
 }
 
 export interface JsonDailyUsage {
@@ -63,3 +67,72 @@ export interface JsonDailyUsage {
   total: number;
   breakdown: ModelUsage[];
 }
+
+export interface PricingSource {
+  url: string;
+  retrievedAt: string;
+  mode: OpenAIPricingMode;
+}
+
+export interface ProviderPricingSummary {
+  vendor: "openai";
+  source: PricingSource;
+  models: PricedModelCost[];
+  unresolvedModels: UnresolvedModelCost[];
+  totals: {
+    input: number;
+    uncachedInput: number;
+    cachedInput: number;
+    output: number;
+    estimatedCost: {
+      input: number;
+      cachedInput: number;
+      output: number;
+      total: number;
+    };
+  };
+  subscriptionComparison: {
+    monthlyPrice: number;
+    months: number;
+    totalSubscriptionCost: number;
+    difference: number;
+    cheaperOption: "api" | "subscription" | "equal";
+  };
+  notes: string[];
+}
+
+export interface PricedModelCost {
+  model: string;
+  pricingModel: string;
+  tokens: {
+    input: number;
+    uncachedInput: number;
+    cachedInput: number;
+    output: number;
+    total: number;
+  };
+  ratesPer1M: {
+    input: number;
+    cachedInput: number | null;
+    output: number;
+  };
+  estimatedCost: {
+    input: number;
+    cachedInput: number;
+    output: number;
+    total: number;
+  };
+}
+
+export interface UnresolvedModelCost {
+  model: string;
+  reason: string;
+  tokens: {
+    input: number;
+    cachedInput: number;
+    output: number;
+    total: number;
+  };
+}
+
+export type OpenAIPricingMode = "batch" | "flex" | "standard" | "priority";

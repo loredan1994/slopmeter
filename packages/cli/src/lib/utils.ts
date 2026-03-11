@@ -1,6 +1,13 @@
+import { createReadStream } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { DailyUsage, Insights, ModelUsage, UsageSummary } from "../interfaces";
+import { createInterface } from "node:readline";
+import type {
+  DailyUsage,
+  Insights,
+  ModelUsage,
+  UsageSummary,
+} from "../interfaces";
 
 export function formatLocalDate(date: Date) {
   const y = date.getFullYear();
@@ -165,6 +172,41 @@ export async function readJsonLines<T>(filePath: string): Promise<T[]> {
     .map((line) => JSON.parse(line.trim()) as T);
 }
 
+export async function forEachJsonLine<T>(
+  filePath: string,
+  onLine: (value: T) => void | Promise<void>,
+): Promise<void> {
+  const input = createReadStream(filePath, { encoding: "utf8" });
+  const reader = createInterface({
+    input,
+    crlfDelay: Infinity,
+  });
+
+  try {
+    for await (const line of reader) {
+      const trimmed = line.trim();
+
+      if (trimmed === "") {
+        continue;
+      }
+
+      let parsed: T;
+
+      try {
+        parsed = JSON.parse(trimmed) as T;
+      } catch {
+        // Session logs can contain truncated in-flight writes; skip malformed rows.
+        continue;
+      }
+
+      await onLine(parsed);
+    }
+  } finally {
+    reader.close();
+    input.destroy();
+  }
+}
+
 export function getRecentWindowStart(endDate: Date, days = 30) {
   const start = new Date(endDate);
 
@@ -204,6 +246,43 @@ export function getTopModel(
       total: bestTotals.total,
     },
   };
+}
+
+export function getTopModels(
+  modelTotals: Map<string, ModelTokenTotals>,
+  limit = 5,
+): ModelUsage[] {
+  if (limit <= 0) {
+    return [];
+  }
+
+  return [...modelTotals.entries()]
+    .filter(([, totals]) => totals.total > 0)
+    .sort(([nameA, totalsA], [nameB, totalsB]) => {
+      if (totalsB.total !== totalsA.total) {
+        return totalsB.total - totalsA.total;
+      }
+
+      if (totalsB.output !== totalsA.output) {
+        return totalsB.output - totalsA.output;
+      }
+
+      if (totalsB.input !== totalsA.input) {
+        return totalsB.input - totalsA.input;
+      }
+
+      return nameA.localeCompare(nameB);
+    })
+    .slice(0, limit)
+    .map(([name, totals]) => ({
+      name,
+      tokens: {
+        input: totals.input,
+        output: totals.output,
+        cache: { input: totals.cache.input, output: totals.cache.output },
+        total: totals.total,
+      },
+    }));
 }
 
 function startOfDay(date: Date) {
@@ -281,10 +360,14 @@ export function getProviderInsights(
 ): Insights {
   const mostUsedModel = getTopModel(modelTotals);
   const recentMostUsedModel = getTopModel(recentModelTotals);
+  const topModels = getTopModels(modelTotals);
+  const recentTopModels = getTopModels(recentModelTotals);
 
   return {
     mostUsedModel,
     recentMostUsedModel,
+    topModels,
+    recentTopModels,
     streaks: {
       longest: computeLongestStreak(daily),
       current: computeCurrentStreak(daily, end),
