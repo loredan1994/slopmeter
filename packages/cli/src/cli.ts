@@ -39,6 +39,7 @@ interface CliArgValues {
   dark: boolean;
   claude: boolean;
   codex: boolean;
+  gemini: boolean;
   opencode: boolean;
   openaiPricing: boolean;
 }
@@ -53,11 +54,12 @@ const HELP_TEXT = `slopmeter
 Generate usage heatmap image(s), optionally limited to a custom date window.
 
 Usage:
-  slopmeter [--claude] [--codex] [--opencode] [--dark] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--format png|svg|json] [--output ./heatmap.png] [--openai-pricing]
+  slopmeter [--claude] [--codex] [--gemini] [--opencode] [--dark] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--format png|svg|json] [--output ./heatmap.png] [--openai-pricing]
 
 Options:
   --claude                    Render Claude Code graph
   --codex                     Render Codex graph
+  --gemini                    Render Gemini CLI graph
   --opencode                  Render Open Code graph
   --dark                      Render with the dark theme
   --since                     Start date in YYYY-MM-DD (default: 1 year before end date)
@@ -88,6 +90,7 @@ function validateArgs(values: unknown): asserts values is CliArgValues {
       dark: ow.boolean,
       claude: ow.boolean,
       codex: ow.boolean,
+      gemini: ow.boolean,
       opencode: ow.boolean,
       openaiPricing: ow.boolean,
     }),
@@ -261,7 +264,7 @@ function selectProvidersToRender(
 
   if (providersToRender.length === 0) {
     throw new Error(
-      "No usage data found for Claude code, Codex, or Open code.",
+      `No usage data found for ${providerIds.map((provider) => providerStatusLabel[provider]).join(", ")}.`,
     );
   }
 
@@ -462,6 +465,7 @@ async function main() {
       dark: { type: "boolean", default: false },
       claude: { type: "boolean", default: false },
       codex: { type: "boolean", default: false },
+      gemini: { type: "boolean", default: false },
       opencode: { type: "boolean", default: false },
       "openai-pricing": { type: "boolean", default: false },
       "pricing-mode": { type: "string" },
@@ -481,6 +485,7 @@ async function main() {
     dark: parsed.values.dark,
     claude: parsed.values.claude,
     codex: parsed.values.codex,
+    gemini: parsed.values.gemini,
     opencode: parsed.values.opencode,
     openaiPricing: parsed.values["openai-pricing"],
   };
@@ -524,13 +529,17 @@ async function main() {
       spinner.start("Fetching OpenAI pricing...");
 
       for (const provider of exportProviders) {
-        provider.pricing = await estimateOpenAICosts({
+        const pricing = await estimateOpenAICosts({
           summary: provider,
           mode: pricingMode,
           subscriptionPrice: subscriptionPrice!,
           startDate: start,
           endDate: end,
         });
+
+        if (pricing.models.length > 0) {
+          provider.pricing = pricing;
+        }
       }
 
       spinner.stop();

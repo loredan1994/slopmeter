@@ -8,6 +8,7 @@
         "NODE_ENV",
         "CLAUDE_CONFIG_DIR",
         "CODEX_HOME",
+        "GEMINI_HOME",
         "OPENCODE_DATA_DIR",
         "XDG_CONFIG_HOME"
       ],
@@ -24,6 +25,7 @@
         "NODE_ENV",
         "CLAUDE_CONFIG_DIR",
         "CODEX_HOME",
+        "GEMINI_HOME",
         "OPENCODE_DATA_DIR",
         "XDG_CONFIG_HOME"
       ]

@@ -35,6 +35,8 @@ interface ResolvedPricingRow {
   note?: string;
 }
 
+const pricingIndexCache = new Map<OpenAIPricingMode, Promise<PricingIndex>>();
+
 const modelAliases: Record<string, string> = {
   "gpt-5.4": "gpt-5.4 (<272K context length)",
   "gpt-5.4-pro": "gpt-5.4-pro (<272K context length)",
@@ -135,29 +137,48 @@ function parsePricingRows(tbodyHtml: string) {
 async function fetchPricingIndex(
   mode: OpenAIPricingMode,
 ): Promise<PricingIndex> {
-  const response = await fetch(OPENAI_PRICING_URL);
+  const cached = pricingIndexCache.get(mode);
 
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch OpenAI pricing docs: ${response.status} ${response.statusText}`,
-    );
+  if (cached) {
+    return cached;
   }
 
-  const html = await response.text();
-  const rows = parsePricingRows(extractPricingTableBody(html, mode));
+  const pending = (async () => {
+    const response = await fetch(OPENAI_PRICING_URL);
 
-  if (rows.length === 0) {
-    throw new Error("OpenAI pricing docs did not include any parseable rows.");
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch OpenAI pricing docs: ${response.status} ${response.statusText}`,
+      );
+    }
+
+    const html = await response.text();
+    const rows = parsePricingRows(extractPricingTableBody(html, mode));
+
+    if (rows.length === 0) {
+      throw new Error(
+        "OpenAI pricing docs did not include any parseable rows.",
+      );
+    }
+
+    return {
+      source: {
+        url: response.url || OPENAI_PRICING_URL,
+        retrievedAt: new Date().toISOString(),
+        mode,
+      },
+      rows: new Map(rows.map((row) => [row.model, row])),
+    };
+  })();
+
+  pricingIndexCache.set(mode, pending);
+
+  try {
+    return await pending;
+  } catch (error) {
+    pricingIndexCache.delete(mode);
+    throw error;
   }
-
-  return {
-    source: {
-      url: response.url || OPENAI_PRICING_URL,
-      retrievedAt: new Date().toISOString(),
-      mode,
-    },
-    rows: new Map(rows.map((row) => [row.model, row])),
-  };
 }
 
 function aggregateModels(daily: DailyUsage[]) {

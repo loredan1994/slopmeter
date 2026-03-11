@@ -1,6 +1,7 @@
 import type { UsageSummary } from "./interfaces";
 import { loadClaudeRows } from "./lib/claude-code";
 import { loadCodexRows } from "./lib/codex";
+import { loadGeminiRows } from "./lib/gemini";
 import {
   providerIds,
   providerStatusLabel,
@@ -26,6 +27,7 @@ export async function aggregateUsage({
   > = {
     claude: loadClaudeRows,
     codex: loadCodexRows,
+    gemini: loadGeminiRows,
     opencode: loadOpenCodeRows,
   };
   const summaries = {} as Record<ProviderId, UsageSummary | null>;

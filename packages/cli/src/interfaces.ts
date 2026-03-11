@@ -1,5 +1,5 @@
 export interface UsageSummary {
-  provider: "claude" | "codex" | "opencode";
+  provider: "claude" | "codex" | "gemini" | "opencode";
   daily: DailyUsage[];
   insights?: Insights;
   pricing?: ProviderPricingSummary;
@@ -50,7 +50,7 @@ export interface JsonExportPayload {
 }
 
 export interface JsonUsageSummary {
-  provider: "claude" | "codex" | "opencode";
+  provider: "claude" | "codex" | "gemini" | "opencode";
   daily: JsonDailyUsage[];
   insights?: Insights;
   pricing?: ProviderPricingSummary;

@@ -127,6 +127,25 @@ export const heatmapThemes: Record<ProviderId, HeatmapTheme> = {
       ],
     },
   },
+  gemini: {
+    title: "Gemini CLI",
+    colors: {
+      light: [
+        "#ecfeff", // cyan-50
+        "#a5f3fc", // cyan-200
+        "#67e8f9", // cyan-300
+        "#06b6d4", // cyan-500
+        "#155e75", // cyan-800
+      ],
+      dark: [
+        "#164e63", // cyan-900
+        "#0e7490", // cyan-700
+        "#0891b2", // cyan-600
+        "#22d3ee", // cyan-400
+        "#a5f3fc", // cyan-200
+      ],
+    },
+  },
   opencode: {
     title: "Open Code",
     colors: {
