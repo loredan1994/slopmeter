@@ -9,6 +9,8 @@
         "CLAUDE_CONFIG_DIR",
         "CODEX_HOME",
         "GEMINI_HOME",
+        "COPILOT_HOME",
+        "ANTIGRAVITY_HOME",
         "OPENCODE_DATA_DIR",
         "XDG_CONFIG_HOME"
       ],
@@ -26,6 +28,8 @@
         "CLAUDE_CONFIG_DIR",
         "CODEX_HOME",
         "GEMINI_HOME",
+        "COPILOT_HOME",
+        "ANTIGRAVITY_HOME",
         "OPENCODE_DATA_DIR",
         "XDG_CONFIG_HOME"
       ]

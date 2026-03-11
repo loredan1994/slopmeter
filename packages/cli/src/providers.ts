@@ -1,5 +1,7 @@
 import type { UsageSummary } from "./interfaces";
+import { loadAntigravityRows } from "./lib/antigravity";
 import { loadClaudeRows } from "./lib/claude-code";
+import { loadCopilotRows } from "./lib/copilot";
 import { loadCodexRows } from "./lib/codex";
 import { loadGeminiRows } from "./lib/gemini";
 import {
@@ -28,6 +30,8 @@ export async function aggregateUsage({
     claude: loadClaudeRows,
     codex: loadCodexRows,
     gemini: loadGeminiRows,
+    copilot: loadCopilotRows,
+    antigravity: loadAntigravityRows,
     opencode: loadOpenCodeRows,
   };
   const summaries = {} as Record<ProviderId, UsageSummary | null>;

@@ -6,6 +6,7 @@ import type {
   DailyUsage,
   Insights,
   ModelUsage,
+  UsagePresentation,
   UsageSummary,
 } from "../interfaces";
 
@@ -381,6 +382,7 @@ export function createUsageSummary(
   modelTotals: Map<string, ModelTokenTotals>,
   recentModelTotals: Map<string, ModelTokenTotals>,
   end: Date,
+  presentation?: UsagePresentation,
 ): UsageSummary {
   const daily = totalsToRows(totals);
 
@@ -388,6 +390,7 @@ export function createUsageSummary(
     provider,
     daily,
     insights: getProviderInsights(modelTotals, recentModelTotals, daily, end),
+    presentation,
   };
 }
 

@@ -4,6 +4,7 @@ import type {
   Insights,
   ModelUsage,
   ProviderPricingSummary,
+  UsagePresentation,
 } from "./interfaces";
 import type { ProviderId } from "./lib/interfaces";
 import { formatLocalDate } from "./lib/utils";
@@ -56,6 +57,7 @@ interface DrawHeatmapSectionOptions {
   daily: DailyUsage[];
   insights?: Insights;
   pricing?: ProviderPricingSummary;
+  presentation?: UsagePresentation;
   title: string;
   colors: HeatmapTheme["colors"];
   colorMode: ColorMode;
@@ -66,6 +68,7 @@ interface RenderUsageHeatmapsSvgSection {
   daily: DailyUsage[];
   insights?: Insights;
   pricing?: ProviderPricingSummary;
+  presentation?: UsagePresentation;
   title: string;
   colors: HeatmapTheme["colors"];
 }
@@ -143,6 +146,44 @@ export const heatmapThemes: Record<ProviderId, HeatmapTheme> = {
         "#0891b2", // cyan-600
         "#22d3ee", // cyan-400
         "#a5f3fc", // cyan-200
+      ],
+    },
+  },
+  copilot: {
+    title: "GitHub Copilot",
+    colors: {
+      light: [
+        "#eef2ff",
+        "#c7d2fe",
+        "#818cf8",
+        "#4f46e5",
+        "#312e81",
+      ],
+      dark: [
+        "#1e1b4b",
+        "#312e81",
+        "#4338ca",
+        "#818cf8",
+        "#c7d2fe",
+      ],
+    },
+  },
+  antigravity: {
+    title: "Antigravity",
+    colors: {
+      light: [
+        "#f0fdf4",
+        "#bbf7d0",
+        "#86efac",
+        "#22c55e",
+        "#166534",
+      ],
+      dark: [
+        "#14532d",
+        "#166534",
+        "#15803d",
+        "#4ade80",
+        "#bbf7d0",
       ],
     },
   },
@@ -252,6 +293,24 @@ function formatUsdCompact(value: number) {
   }
 
   return `${prefix}${absolute.toFixed(2)}`;
+}
+
+function formatCountTotal(value: number) {
+  if (value >= 10_000) {
+    return new Intl.NumberFormat("en-US", {
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }).format(value);
+  }
+
+  return numberFormatter.format(value);
+}
+
+function formatMetricValue(
+  value: number,
+  format: "count" | "tokens" = "tokens",
+) {
+  return format === "count" ? formatCountTotal(value) : formatTokenTotal(value);
 }
 
 function truncateText(value: string, maxLength: number) {
@@ -426,6 +485,7 @@ function drawHeatmapSection(
     daily,
     insights,
     pricing,
+    presentation,
     title,
     colors,
     colorMode,
@@ -453,16 +513,25 @@ function drawHeatmapSection(
     totalTokens += row.total;
   }
 
-  const topMetricGap = 120;
-  const headerInputX = rightEdge - topMetricGap * 3;
-  const headerCacheX = rightEdge - topMetricGap * 2;
-  const headerOutputX = rightEdge - topMetricGap;
-  const totalTokensLabel = formatTokenTotal(totalTokens);
-  const totalInputLabel = formatTokenTotal(totalInputTokens);
-  const totalCachedLabel = formatTokenTotal(totalCachedTokens);
-  const totalOutputLabel = formatTokenTotal(totalOutputTokens);
+  const usageUnit = presentation?.usageUnit ?? "tokens";
+  const entityLabel = presentation?.entityLabel ?? "model";
+  const leaderboardTitle = presentation?.leaderboardTitle ?? "Top models";
+  const noBreakdownMessage =
+    presentation?.noBreakdownMessage ?? "No model data available";
   const cachedHeaderLabel =
     totalCachedOutputTokens > 0 ? "Cached tokens" : "Cached input tokens";
+  const headerMetrics =
+    presentation?.headerMetrics?.slice(0, 4) ?? [
+      { label: "Input tokens", value: totalInputTokens, format: "tokens" as const },
+      {
+        label: cachedHeaderLabel,
+        value: totalCachedTokens,
+        format: "tokens" as const,
+      },
+      { label: "Output tokens", value: totalOutputTokens, format: "tokens" as const },
+      { label: "Total tokens", value: totalTokens, format: "tokens" as const },
+    ];
+  const topMetricGap = 120;
   const longestStreak = insights?.streaks.longest ?? 0;
   const currentStreak = insights?.streaks.current ?? 0;
 
@@ -479,117 +548,38 @@ function drawHeatmapSection(
     title,
   );
 
-  svg = svg.text(
-    {
-      x: headerInputX,
-      y: y + layout.headerCaptionY,
-      fill: palette.muted,
-      "font-size": metricCaptionFontSize,
-      "font-weight": 600,
-      "text-anchor": "end",
-      "dominant-baseline": "hanging",
-      "font-family": fontFamily,
-    },
-    caption("Input tokens"),
-  );
+  headerMetrics.forEach((metric, index) => {
+    const metricX =
+      rightEdge - topMetricGap * (headerMetrics.length - 1 - index);
 
-  svg = svg.text(
-    {
-      x: headerInputX,
-      y: y + layout.headerValueY,
-      fill: palette.text,
-      "font-size": metricValueFontSize,
-      "font-weight": 600,
-      "text-anchor": "end",
-      "dominant-baseline": "hanging",
-      "font-family": fontFamily,
-    },
-    totalInputLabel,
-  );
+    svg = svg.text(
+      {
+        x: metricX,
+        y: y + layout.headerCaptionY,
+        fill: palette.muted,
+        "font-size": metricCaptionFontSize,
+        "font-weight": 600,
+        "text-anchor": "end",
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      caption(metric.label),
+    );
 
-  svg = svg.text(
-    {
-      x: headerCacheX,
-      y: y + layout.headerCaptionY,
-      fill: palette.muted,
-      "font-size": metricCaptionFontSize,
-      "font-weight": 600,
-      "text-anchor": "end",
-      "dominant-baseline": "hanging",
-      "font-family": fontFamily,
-    },
-    caption(cachedHeaderLabel),
-  );
-
-  svg = svg.text(
-    {
-      x: headerCacheX,
-      y: y + layout.headerValueY,
-      fill: palette.text,
-      "font-size": metricValueFontSize,
-      "font-weight": 600,
-      "text-anchor": "end",
-      "dominant-baseline": "hanging",
-      "font-family": fontFamily,
-    },
-    totalCachedLabel,
-  );
-
-  svg = svg.text(
-    {
-      x: headerOutputX,
-      y: y + layout.headerCaptionY,
-      fill: palette.muted,
-      "font-size": metricCaptionFontSize,
-      "font-weight": 600,
-      "text-anchor": "end",
-      "dominant-baseline": "hanging",
-      "font-family": fontFamily,
-    },
-    caption("Output tokens"),
-  );
-
-  svg = svg.text(
-    {
-      x: headerOutputX,
-      y: y + layout.headerValueY,
-      fill: palette.text,
-      "font-size": metricValueFontSize,
-      "font-weight": 600,
-      "text-anchor": "end",
-      "dominant-baseline": "hanging",
-      "font-family": fontFamily,
-    },
-    totalOutputLabel,
-  );
-
-  svg = svg.text(
-    {
-      x: rightEdge,
-      y: y + layout.headerCaptionY,
-      fill: palette.muted,
-      "font-size": metricCaptionFontSize,
-      "font-weight": 600,
-      "text-anchor": "end",
-      "dominant-baseline": "hanging",
-      "font-family": fontFamily,
-    },
-    caption("Total tokens"),
-  );
-
-  svg = svg.text(
-    {
-      x: rightEdge,
-      y: y + layout.headerValueY,
-      fill: palette.text,
-      "font-size": metricValueFontSize,
-      "font-weight": 600,
-      "text-anchor": "end",
-      "dominant-baseline": "hanging",
-      "font-family": fontFamily,
-    },
-    totalTokensLabel,
-  );
+    svg = svg.text(
+      {
+        x: metricX,
+        y: y + layout.headerValueY,
+        fill: palette.text,
+        "font-size": metricValueFontSize,
+        "font-weight": 600,
+        "text-anchor": "end",
+        "dominant-baseline": "hanging",
+        "font-family": fontFamily,
+      },
+      formatMetricValue(metric.value, metric.format ?? usageUnit),
+    );
+  });
 
   for (let i = 0; i < 7; i += 1) {
     const dayY =
@@ -716,12 +706,15 @@ function drawHeatmapSection(
   const leftRows: ModelUsageRow[] = [];
 
   if (insights?.mostUsedModel) {
-    leftRows.push({ caption: "Most used model", data: insights.mostUsedModel });
+    leftRows.push({
+      caption: `Most used ${entityLabel}`,
+      data: insights.mostUsedModel,
+    });
   }
 
   if (insights?.recentMostUsedModel) {
     leftRows.push({
-      caption: "Recent use (last 30 days)",
+      caption: `Recent ${entityLabel} (last 30 days)`,
       data: insights.recentMostUsedModel,
     });
   }
@@ -731,7 +724,7 @@ function drawHeatmapSection(
     const valueY = layout.footerValueY;
     const modelName = truncateText(row.data.name, 20);
     const modelX = index === 0 ? leftColumnX : leftSecondaryX;
-    const tokenLabel = `(${formatTokenTotal(row.data.tokens.total)})`;
+    const tokenLabel = `(${formatMetricValue(row.data.tokens.total, usageUnit)})`;
 
     svg = svg.text(
       {
@@ -823,7 +816,7 @@ function drawHeatmapSection(
       "dominant-baseline": "hanging",
       "font-family": fontFamily,
     },
-    caption("Top models"),
+    caption(leaderboardTitle),
   );
 
   if (topModels.length === 0) {
@@ -836,7 +829,7 @@ function drawHeatmapSection(
         "dominant-baseline": "hanging",
         "font-family": fontFamily,
       },
-      "No model data available",
+      noBreakdownMessage,
     );
 
     return svg;
@@ -846,7 +839,7 @@ function drawHeatmapSection(
     const rowY =
       y + layout.leaderboardRowStartY + index * layout.leaderboardRowGap;
     const modelLabel = truncateText(model.name, 42);
-    const tokenLabel = `${formatTokenTotal(model.tokens.total)} (${formatPercent(model.tokens.total, totalTokens)})`;
+    const tokenLabel = `${formatMetricValue(model.tokens.total, usageUnit)} (${formatPercent(model.tokens.total, totalTokens)})`;
 
     svg = svg.text(
       {
@@ -892,42 +885,65 @@ function drawHeatmapSection(
     return svg;
   }
 
-  const pricingCaption = `Same usage, two billing paths (${pricing.source.mode})`;
+  const modeSuffix = pricing.source.mode ? ` (${pricing.source.mode})` : "";
+  const pricingCaption = pricing.subscriptionComparison
+    ? `Same usage, two billing paths${modeSuffix}`
+    : `Official API pricing${modeSuffix}`;
   const apiEstimate = pricing.totals.estimatedCost.total;
-  const subscriptionEstimate =
-    pricing.subscriptionComparison.totalSubscriptionCost;
-  const difference = pricing.subscriptionComparison.difference;
   const costDrivers = pricing.models.slice(0, pricingMaxRows);
-  const comparisonLabel =
-    pricing.subscriptionComparison.cheaperOption === "subscription"
-      ? "Sub savings"
-      : pricing.subscriptionComparison.cheaperOption === "api"
-        ? "API savings"
-        : "No difference";
-  const comparisonValue =
-    pricing.subscriptionComparison.cheaperOption === "equal"
-      ? "$0.00"
-      : formatUsdCompact(Math.abs(difference));
-  const summaryColumns = [
-    {
-      label: "API-key route",
-      value: formatUsdCompact(apiEstimate),
-      x: leftColumnX,
-      anchor: "start" as const,
-    },
-    {
-      label: "Sub route",
-      value: formatUsdCompact(subscriptionEstimate),
-      x: x + layout.width / 2,
-      anchor: "middle" as const,
-    },
-    {
-      label: comparisonLabel,
-      value: comparisonValue,
-      x: rightEdge,
-      anchor: "end" as const,
-    },
-  ];
+  const summaryColumns = pricing.subscriptionComparison
+    ? [
+        {
+          label: "API-key route",
+          value: formatUsdCompact(apiEstimate),
+          x: leftColumnX,
+          anchor: "start" as const,
+        },
+        {
+          label: "Sub route",
+          value: formatUsdCompact(
+            pricing.subscriptionComparison.totalSubscriptionCost,
+          ),
+          x: x + layout.width / 2,
+          anchor: "middle" as const,
+        },
+        {
+          label:
+            pricing.subscriptionComparison.cheaperOption === "subscription"
+              ? "Sub savings"
+              : pricing.subscriptionComparison.cheaperOption === "api"
+                ? "API savings"
+                : "No difference",
+          value:
+            pricing.subscriptionComparison.cheaperOption === "equal"
+              ? "$0.00"
+              : formatUsdCompact(
+                  Math.abs(pricing.subscriptionComparison.difference),
+                ),
+          x: rightEdge,
+          anchor: "end" as const,
+        },
+      ]
+    : [
+        {
+          label: "API estimate",
+          value: formatUsdCompact(apiEstimate),
+          x: leftColumnX,
+          anchor: "start" as const,
+        },
+        {
+          label: "Priced models",
+          value: numberFormatter.format(pricing.models.length),
+          x: x + layout.width / 2,
+          anchor: "middle" as const,
+        },
+        {
+          label: "Unresolved",
+          value: numberFormatter.format(pricing.unresolvedModels.length),
+          x: rightEdge,
+          anchor: "end" as const,
+        },
+      ];
 
   svg = svg.text(
     {
@@ -1046,9 +1062,13 @@ function drawHeatmapSection(
     );
   }
 
-  const pricingNotes = [
-    "Same logged usage, priced as either API keys or one fixed monthly subscription.",
-  ];
+  const pricingNotes = pricing.subscriptionComparison
+    ? [
+        "Same logged usage, priced as either API keys or one fixed monthly subscription.",
+      ]
+    : [
+        `Official ${pricing.vendor} API pricing for models with a current matching docs row.`,
+      ];
 
   if (pricing.unresolvedModels.length > 0) {
     pricingNotes.push(
@@ -1123,6 +1143,7 @@ export function renderUsageHeatmapsSvg({
       daily: section.daily,
       insights: section.insights,
       pricing: section.pricing,
+      presentation: section.presentation,
       title: section.title,
       colors: section.colors,
       colorMode,

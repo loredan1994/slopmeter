@@ -7,11 +7,11 @@ import sharp from "sharp";
 import { heatmapThemes, renderUsageHeatmapsSvg, type ColorMode } from "./graph";
 import type {
   JsonExportPayload,
-  OpenAIPricingMode,
+  PricingMode,
   JsonUsageSummary,
   UsageSummary,
 } from "./interfaces";
-import { estimateOpenAICosts } from "./lib/openai-pricing";
+import { estimateProviderCosts } from "./lib/pricing";
 import type { ProviderId } from "./providers";
 import { formatLocalDate } from "./lib/utils";
 import { aggregateUsage, providerIds, providerStatusLabel } from "./providers";
@@ -40,7 +40,10 @@ interface CliArgValues {
   claude: boolean;
   codex: boolean;
   gemini: boolean;
+  copilot: boolean;
+  antigravity: boolean;
   opencode: boolean;
+  officialPricing: boolean;
   openaiPricing: boolean;
 }
 
@@ -54,19 +57,22 @@ const HELP_TEXT = `slopmeter
 Generate usage heatmap image(s), optionally limited to a custom date window.
 
 Usage:
-  slopmeter [--claude] [--codex] [--gemini] [--opencode] [--dark] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--format png|svg|json] [--output ./heatmap.png] [--openai-pricing]
+  slopmeter [--claude] [--codex] [--gemini] [--copilot] [--antigravity] [--opencode] [--dark] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--format png|svg|json] [--output ./heatmap.png] [--official-pricing]
 
 Options:
   --claude                    Render Claude Code graph
   --codex                     Render Codex graph
   --gemini                    Render Gemini CLI graph
+  --copilot                   Render GitHub Copilot graph
+  --antigravity               Render Antigravity graph
   --opencode                  Render Open Code graph
   --dark                      Render with the dark theme
   --since                     Start date in YYYY-MM-DD (default: 1 year before end date)
   --until                     End date in YYYY-MM-DD (default: today)
-  --openai-pricing            Fetch official OpenAI API pricing and compare API-key cost against a fixed monthly subscription
-  --pricing-mode              OpenAI pricing mode: standard, batch, flex, or priority (default: standard)
-  --subscription-price        Monthly subscription reference price in USD (default: 200)
+  --official-pricing          Fetch official vendor pricing where supported (OpenAI for Codex, Google for Gemini)
+  --openai-pricing            Legacy alias for --official-pricing
+  --pricing-mode              Pricing mode: standard, batch, flex, or priority (default: standard)
+  --subscription-price        Monthly subscription reference price in USD (default: 200, used for OpenAI subscription comparisons)
   -f, --format                Output format: png, svg, or json (default: png)
   -o, --output                Output file path (default: ./heatmap-last-year.png)
   -h, --help                  Show this help
@@ -91,7 +97,10 @@ function validateArgs(values: unknown): asserts values is CliArgValues {
       claude: ow.boolean,
       codex: ow.boolean,
       gemini: ow.boolean,
+      copilot: ow.boolean,
+      antigravity: ow.boolean,
       opencode: ow.boolean,
+      officialPricing: ow.boolean,
       openaiPricing: ow.boolean,
     }),
   );
@@ -152,6 +161,7 @@ function toJsonUsageSummary(summary: UsageSummary): JsonUsageSummary {
     provider: summary.provider,
     insights: summary.insights,
     pricing: summary.pricing,
+    presentation: summary.presentation,
     daily: summary.daily.map((row) => ({
       date: formatLocalDate(row.date),
       input: row.input,
@@ -271,12 +281,12 @@ function selectProvidersToRender(
   return providersToRender.map((provider) => rowsByProvider[provider]!);
 }
 
-function inferPricingMode(value: string | undefined): OpenAIPricingMode {
+function inferPricingMode(value: string | undefined): PricingMode {
   const normalized = value ?? "standard";
 
   ow(normalized, ow.string.oneOf(["batch", "flex", "standard", "priority"]));
 
-  return normalized as OpenAIPricingMode;
+  return normalized as PricingMode;
 }
 
 function parseSubscriptionPrice(value: string | undefined) {
@@ -305,9 +315,8 @@ function truncate(value: string, maxLength: number) {
   return `${value.slice(0, Math.max(maxLength - 3, 1))}...`;
 }
 
-function printOpenAIPricingReport(
+function printPricingReport(
   providers: UsageSummary[],
-  subscriptionPrice: number,
 ) {
   const pricedProviders = providers.filter((provider) => provider.pricing);
 
@@ -321,28 +330,21 @@ function printOpenAIPricingReport(
 
       accumulator.apiCost += pricing.totals.estimatedCost.total;
       accumulator.subscriptionCost +=
-        pricing.subscriptionComparison.totalSubscriptionCost;
+        pricing.subscriptionComparison?.totalSubscriptionCost ?? 0;
       accumulator.notes.push(...pricing.notes);
+      accumulator.hasSubscriptionComparison ||= Boolean(pricing.subscriptionComparison);
 
       return accumulator;
     },
     {
       apiCost: 0,
       subscriptionCost: 0,
+      hasSubscriptionComparison: false,
       notes: [] as string[],
     },
   );
 
-  process.stdout.write("\nOpenAI pricing comparison for same usage\n");
-  process.stdout.write(
-    `Source: ${pricedProviders[0].pricing!.source.url} (${pricedProviders[0].pricing!.source.mode}, fetched ${pricedProviders[0].pricing!.source.retrievedAt})\n`,
-  );
-  process.stdout.write(
-    `Subscription reference: ${formatUsd(subscriptionPrice)}/month\n`,
-  );
-  process.stdout.write(
-    "Scenario: the same logged usage is priced two ways, once as API-key usage and once as a fixed monthly subscription.\n",
-  );
+  process.stdout.write("\nOfficial API pricing summary\n");
 
   for (const provider of pricedProviders) {
     const pricing = provider.pricing!;
@@ -355,6 +357,9 @@ function printOpenAIPricingReport(
     };
 
     process.stdout.write(`\n${heatmapThemes[provider.provider].title}\n`);
+    process.stdout.write(
+      `Source: ${pricing.source.url} (${pricing.vendor}${pricing.source.mode ? `, ${pricing.source.mode}` : ""}, fetched ${pricing.source.retrievedAt})\n`,
+    );
     process.stdout.write(
       `${"Model".padEnd(columns.model)}${"Input".padStart(columns.input)}${"Cached".padStart(columns.cached)}${"Output".padStart(columns.output)}${"API-key est.".padStart(columns.cost)}\n`,
     );
@@ -374,19 +379,22 @@ function printOpenAIPricingReport(
     process.stdout.write(
       `Total if billed via API keys: ${formatUsd(pricing.totals.estimatedCost.total)}\n`,
     );
-    process.stdout.write(
-      `Total if covered by subscription: ${formatUsd(pricing.subscriptionComparison.totalSubscriptionCost)} (${pricing.subscriptionComparison.months} months)\n`,
-    );
-    if (pricing.subscriptionComparison.cheaperOption === "subscription") {
+
+    if (pricing.subscriptionComparison) {
       process.stdout.write(
-        `Subscription savings vs API keys: ${formatUsd(pricing.subscriptionComparison.difference)}\n`,
+        `Total if covered by subscription: ${formatUsd(pricing.subscriptionComparison.totalSubscriptionCost)} (${pricing.subscriptionComparison.months} months)\n`,
       );
-    } else if (pricing.subscriptionComparison.cheaperOption === "api") {
-      process.stdout.write(
-        `API-key savings vs subscription: ${formatUsd(Math.abs(pricing.subscriptionComparison.difference))}\n`,
-      );
-    } else {
-      process.stdout.write("No cost difference between the two routes.\n");
+      if (pricing.subscriptionComparison.cheaperOption === "subscription") {
+        process.stdout.write(
+          `Subscription savings vs API keys: ${formatUsd(pricing.subscriptionComparison.difference)}\n`,
+        );
+      } else if (pricing.subscriptionComparison.cheaperOption === "api") {
+        process.stdout.write(
+          `API-key savings vs subscription: ${formatUsd(Math.abs(pricing.subscriptionComparison.difference))}\n`,
+        );
+      } else {
+        process.stdout.write("No cost difference between the two routes.\n");
+      }
     }
   }
 
@@ -401,19 +409,22 @@ function printOpenAIPricingReport(
 
     process.stdout.write("\nCombined total\n");
     process.stdout.write(`Total if billed via API keys: ${formatUsd(combined.apiCost)}\n`);
-    process.stdout.write(
-      `Total if covered by subscription: ${formatUsd(combined.subscriptionCost)}\n`,
-    );
-    if (cheaperOption === "subscription") {
+
+    if (combined.hasSubscriptionComparison) {
       process.stdout.write(
-        `Subscription savings vs API keys: ${formatUsd(combinedDifference)}\n`,
+        `Total if covered by subscription: ${formatUsd(combined.subscriptionCost)}\n`,
       );
-    } else if (cheaperOption === "api") {
-      process.stdout.write(
-        `API-key savings vs subscription: ${formatUsd(Math.abs(combinedDifference))}\n`,
-      );
-    } else {
-      process.stdout.write("No cost difference between the two routes.\n");
+      if (cheaperOption === "subscription") {
+        process.stdout.write(
+          `Subscription savings vs API keys: ${formatUsd(combinedDifference)}\n`,
+        );
+      } else if (cheaperOption === "api") {
+        process.stdout.write(
+          `API-key savings vs subscription: ${formatUsd(Math.abs(combinedDifference))}\n`,
+        );
+      } else {
+        process.stdout.write("No cost difference between the two routes.\n");
+      }
     }
   }
 
@@ -466,7 +477,10 @@ async function main() {
       claude: { type: "boolean", default: false },
       codex: { type: "boolean", default: false },
       gemini: { type: "boolean", default: false },
+      copilot: { type: "boolean", default: false },
+      antigravity: { type: "boolean", default: false },
       opencode: { type: "boolean", default: false },
+      "official-pricing": { type: "boolean", default: false },
       "openai-pricing": { type: "boolean", default: false },
       "pricing-mode": { type: "string" },
       "subscription-price": { type: "string" },
@@ -486,7 +500,10 @@ async function main() {
     claude: parsed.values.claude,
     codex: parsed.values.codex,
     gemini: parsed.values.gemini,
+    copilot: parsed.values.copilot,
+    antigravity: parsed.values.antigravity,
     opencode: parsed.values.opencode,
+    officialPricing: parsed.values["official-pricing"],
     openaiPricing: parsed.values["openai-pricing"],
   };
 
@@ -519,25 +536,26 @@ async function main() {
       rowsByProvider,
       getRequestedProviders(values),
     );
-    const subscriptionPrice = values.openaiPricing
+    const pricingRequested = values.officialPricing || values.openaiPricing;
+    const subscriptionPrice = pricingRequested
       ? parseSubscriptionPrice(values.subscriptionPrice)
       : null;
 
-    if (values.openaiPricing) {
+    if (pricingRequested) {
       const pricingMode = inferPricingMode(values.pricingMode);
 
-      spinner.start("Fetching OpenAI pricing...");
+      spinner.start("Fetching official pricing...");
 
       for (const provider of exportProviders) {
-        const pricing = await estimateOpenAICosts({
+        const pricing = await estimateProviderCosts({
           summary: provider,
           mode: pricingMode,
-          subscriptionPrice: subscriptionPrice!,
+          subscriptionPrice,
           startDate: start,
           endDate: end,
         });
 
-        if (pricing.models.length > 0) {
+        if (pricing && pricing.models.length > 0) {
           provider.pricing = pricing;
         }
       }
@@ -573,10 +591,11 @@ async function main() {
         endDate: end,
         colorMode,
         sections: exportProviders.map(
-          ({ provider, daily, insights, pricing }) => ({
+          ({ provider, daily, insights, pricing, presentation }) => ({
             daily,
             insights,
             pricing,
+            presentation,
             title: heatmapThemes[provider].title,
             colors: heatmapThemes[provider].colors,
           }),
@@ -590,8 +609,8 @@ async function main() {
 
     spinner.succeed("Analysis complete");
 
-    if (values.openaiPricing) {
-      printOpenAIPricingReport(exportProviders, subscriptionPrice!);
+    if (pricingRequested) {
+      printPricingReport(exportProviders);
     }
 
     printRunSummary(

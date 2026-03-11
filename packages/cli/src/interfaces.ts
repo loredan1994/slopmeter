@@ -1,8 +1,15 @@
 export interface UsageSummary {
-  provider: "claude" | "codex" | "gemini" | "opencode";
+  provider:
+    | "claude"
+    | "codex"
+    | "gemini"
+    | "opencode"
+    | "copilot"
+    | "antigravity";
   daily: DailyUsage[];
   insights?: Insights;
   pricing?: ProviderPricingSummary;
+  presentation?: UsagePresentation;
 }
 
 export interface DailyUsage {
@@ -50,10 +57,17 @@ export interface JsonExportPayload {
 }
 
 export interface JsonUsageSummary {
-  provider: "claude" | "codex" | "gemini" | "opencode";
+  provider:
+    | "claude"
+    | "codex"
+    | "gemini"
+    | "opencode"
+    | "copilot"
+    | "antigravity";
   daily: JsonDailyUsage[];
   insights?: Insights;
   pricing?: ProviderPricingSummary;
+  presentation?: UsagePresentation;
 }
 
 export interface JsonDailyUsage {
@@ -68,14 +82,34 @@ export interface JsonDailyUsage {
   breakdown: ModelUsage[];
 }
 
+export type PricingMode = "batch" | "flex" | "standard" | "priority";
+export type PricingVendor = "anthropic" | "google" | "openai";
+export type MetricFormat = "count" | "tokens";
+
+export interface SummaryMetric {
+  label: string;
+  value: number;
+  format?: MetricFormat;
+}
+
+export interface UsagePresentation {
+  usageUnit?: MetricFormat;
+  unitLabel?: string;
+  entityLabel?: string;
+  headerMetrics?: SummaryMetric[];
+  leaderboardTitle?: string;
+  noBreakdownMessage?: string;
+}
+
 export interface PricingSource {
   url: string;
   retrievedAt: string;
-  mode: OpenAIPricingMode;
+  vendor: PricingVendor;
+  mode?: PricingMode | string;
 }
 
 export interface ProviderPricingSummary {
-  vendor: "openai";
+  vendor: PricingVendor;
   source: PricingSource;
   models: PricedModelCost[];
   unresolvedModels: UnresolvedModelCost[];
@@ -91,7 +125,7 @@ export interface ProviderPricingSummary {
       total: number;
     };
   };
-  subscriptionComparison: {
+  subscriptionComparison?: {
     monthlyPrice: number;
     months: number;
     totalSubscriptionCost: number;
@@ -104,6 +138,7 @@ export interface ProviderPricingSummary {
 export interface PricedModelCost {
   model: string;
   pricingModel: string;
+  vendor: PricingVendor;
   tokens: {
     input: number;
     uncachedInput: number;
@@ -126,6 +161,7 @@ export interface PricedModelCost {
 
 export interface UnresolvedModelCost {
   model: string;
+  vendor: PricingVendor;
   reason: string;
   tokens: {
     input: number;
@@ -134,5 +170,3 @@ export interface UnresolvedModelCost {
     total: number;
   };
 }
-
-export type OpenAIPricingMode = "batch" | "flex" | "standard" | "priority";

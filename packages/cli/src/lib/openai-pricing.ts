@@ -1,6 +1,6 @@
 import type {
   DailyUsage,
-  OpenAIPricingMode,
+  PricingMode,
   PricingSource,
   PricedModelCost,
   ProviderPricingSummary,
@@ -35,7 +35,7 @@ interface ResolvedPricingRow {
   note?: string;
 }
 
-const pricingIndexCache = new Map<OpenAIPricingMode, Promise<PricingIndex>>();
+const pricingIndexCache = new Map<PricingMode, Promise<PricingIndex>>();
 
 const modelAliases: Record<string, string> = {
   "gpt-5.4": "gpt-5.4 (<272K context length)",
@@ -97,7 +97,7 @@ function extractLatestPricingSection(html: string) {
   return next === -1 ? html.slice(start) : html.slice(start, next);
 }
 
-function extractPricingTableBody(html: string, mode: OpenAIPricingMode) {
+function extractPricingTableBody(html: string, mode: PricingMode) {
   const section = extractLatestPricingSection(html);
   const pattern = new RegExp(
     `data-content-switcher-pane="true" data-value="${mode}"(?: hidden)?><div class="hidden">[^<]*<\\/div><table[\\s\\S]*?<tbody>([\\s\\S]*?)<\\/tbody><\\/table><\\/div>`,
@@ -135,7 +135,7 @@ function parsePricingRows(tbodyHtml: string) {
 }
 
 async function fetchPricingIndex(
-  mode: OpenAIPricingMode,
+  mode: PricingMode,
 ): Promise<PricingIndex> {
   const cached = pricingIndexCache.get(mode);
 
@@ -165,6 +165,7 @@ async function fetchPricingIndex(
       source: {
         url: response.url || OPENAI_PRICING_URL,
         retrievedAt: new Date().toISOString(),
+        vendor: "openai" as const,
         mode,
       },
       rows: new Map(rows.map((row) => [row.model, row])),
@@ -290,6 +291,7 @@ function createPricedModel(
   return {
     model: tokens.model,
     pricingModel: pricing.model,
+    vendor: "openai",
     tokens: {
       input: tokens.input,
       uncachedInput: uncachedInputTokens,
@@ -317,6 +319,7 @@ function createUnresolvedModel(
 ): UnresolvedModelCost {
   return {
     model: tokens.model,
+    vendor: "openai",
     reason,
     tokens: {
       input: tokens.input,
@@ -335,7 +338,7 @@ export async function estimateOpenAICosts({
   endDate,
 }: {
   summary: UsageSummary;
-  mode: OpenAIPricingMode;
+  mode: PricingMode;
   subscriptionPrice: number;
   startDate: Date;
   endDate: Date;
