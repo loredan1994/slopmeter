@@ -70,17 +70,29 @@ function stripHtml(value: string) {
 function parseCurrencyCell(value: string) {
   const normalized = stripHtml(value);
 
-  if (normalized === "" || normalized === "-" || normalized === "/") {
+  if (
+    normalized === "" ||
+    normalized === "-" ||
+    normalized === "/" ||
+    normalized === "null" ||
+    normalized === "undefined"
+  ) {
     return null;
   }
 
-  const match = normalized.match(/\$([0-9]+(?:\.[0-9]+)?)/);
+  const currencyMatch = normalized.match(/\$([0-9]+(?:\.[0-9]+)?)/);
 
-  if (!match) {
+  if (currencyMatch) {
+    return Number(currencyMatch[1]);
+  }
+
+  const numericMatch = normalized.match(/^([0-9]+(?:\.[0-9]+)?)$/);
+
+  if (!numericMatch) {
     return null;
   }
 
-  return Number(match[1]);
+  return Number(numericMatch[1]);
 }
 
 function extractLatestPricingSection(html: string) {
@@ -99,16 +111,109 @@ function extractLatestPricingSection(html: string) {
 
 function extractPricingTableBody(html: string, mode: PricingMode) {
   const section = extractLatestPricingSection(html);
-  const pattern = new RegExp(
-    `data-content-switcher-pane="true" data-value="${mode}"(?: hidden)?><div class="hidden">[^<]*<\\/div><table[\\s\\S]*?<tbody>([\\s\\S]*?)<\\/tbody><\\/table><\\/div>`,
+  const panePattern = new RegExp(
+    `data-content-switcher-pane="true"[^>]*data-value="${mode}"[^>]*>`,
   );
-  const match = section.match(pattern);
+  const paneMatch = panePattern.exec(section);
 
-  if (!match) {
+  if (!paneMatch) {
     throw new Error(`Could not find the OpenAI ${mode} pricing table.`);
   }
 
-  return match[1];
+  const paneStart = paneMatch.index + paneMatch[0].length;
+  const tbodyStart = section.indexOf("<tbody>", paneStart);
+
+  if (tbodyStart === -1) {
+    throw new Error(`Could not find the OpenAI ${mode} pricing table body.`);
+  }
+
+  const tbodyContentStart = tbodyStart + "<tbody>".length;
+  const tbodyEnd = section.indexOf("</tbody>", tbodyContentStart);
+
+  if (tbodyEnd === -1) {
+    throw new Error(`Could not find the end of the OpenAI ${mode} pricing table body.`);
+  }
+
+  return section.slice(tbodyContentStart, tbodyEnd);
+}
+
+function decodeAstroSerializedValue(value: unknown): unknown {
+  if (!Array.isArray(value) || value.length !== 2 || typeof value[0] !== "number") {
+    return value;
+  }
+
+  const [tag, payload] = value as [number, unknown];
+
+  switch (tag) {
+    case 0:
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        return Object.fromEntries(
+          Object.entries(payload).map(([key, nestedValue]) => [
+            key,
+            decodeAstroSerializedValue(nestedValue),
+          ]),
+        );
+      }
+
+      return payload;
+    case 1:
+      return Array.isArray(payload)
+        ? payload.map((entry) => decodeAstroSerializedValue(entry))
+        : [];
+    default:
+      return payload;
+  }
+}
+
+function parsePricingRowsFromSerializedProps(html: string, mode: PricingMode) {
+  const section = extractLatestPricingSection(html);
+  const panePattern = new RegExp(
+    `data-content-switcher-pane="true"[^>]*data-value="${mode}"[^>]*>`,
+  );
+  const paneMatch = panePattern.exec(section);
+
+  if (!paneMatch) {
+    throw new Error(`Could not find the OpenAI ${mode} pricing table.`);
+  }
+
+  const paneStart = paneMatch.index + paneMatch[0].length;
+  const nextPaneStart = section.indexOf('data-content-switcher-pane="true"', paneStart);
+  const paneHtml =
+    nextPaneStart === -1 ? section.slice(paneStart) : section.slice(paneStart, nextPaneStart);
+  const propsMatch = paneHtml.match(
+    /component-export="TextTokenPricingTables"[^>]*props="([^"]+)"/,
+  );
+
+  if (!propsMatch) {
+    return [];
+  }
+
+  const decodedProps = decodeHtmlEntities(propsMatch[1]);
+  const serialized = JSON.parse(decodedProps) as Record<string, unknown>;
+  const hydrated = decodeAstroSerializedValue([0, serialized]) as {
+    rows?: unknown;
+  };
+
+  if (!Array.isArray(hydrated.rows)) {
+    return [];
+  }
+
+  const rows: PricingRow[] = [];
+
+  for (const row of hydrated.rows) {
+    if (!Array.isArray(row) || row.length < 4) {
+      continue;
+    }
+
+    rows.push({
+      model: String(row[0]),
+      input: parseCurrencyCell(String(row[1] ?? "")),
+      cachedInput: parseCurrencyCell(String(row[2] ?? "")),
+      output: parseCurrencyCell(String(row[3] ?? "")),
+    });
+  }
+
+  return rows;
 }
 
 function parsePricingRows(tbodyHtml: string) {
@@ -153,7 +258,13 @@ async function fetchPricingIndex(
     }
 
     const html = await response.text();
-    const rows = parsePricingRows(extractPricingTableBody(html, mode));
+    const serializedRows = parsePricingRowsFromSerializedProps(html, mode).filter(
+      (row) => row.model !== "",
+    );
+    const rows =
+      serializedRows.length > 0
+        ? serializedRows
+        : parsePricingRows(extractPricingTableBody(html, mode));
 
     if (rows.length === 0) {
       throw new Error(

@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { estimateOpenAICosts } from "../src/lib/openai-pricing";
 
 const cliPath = resolve(import.meta.dirname, "../dist/cli.js");
 const cliRuntime = process.release.name === "node"
@@ -34,6 +35,10 @@ function writeJsonlFile(path: string, records: string[]) {
 function writeJsonFile(path: string, value: string) {
   ensureParent(path);
   writeFileSync(path, value, "utf8");
+}
+
+function roundCurrency(value: number) {
+  return Number(value.toFixed(2));
 }
 
 function codexTurnContext(model = "gpt-5") {
@@ -608,4 +613,119 @@ test("OpenCode fails clearly on oversized SQLite message payloads", async (t) =>
   assert.match(result.stderr, /JSON payload exceeds 256 bytes/);
   assert.match(result.stderr, /opencode\.db:message:msg-db-oversized/);
   assert.match(result.stderr, /SLOPMETER_MAX_JSONL_RECORD_BYTES/);
+});
+
+test("OpenAI pricing parser resolves latest codex rows from serialized pricing props", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const props = {
+    tier: [0, "standard"],
+    rows: [
+      1,
+      [
+        [
+          1,
+          [
+            [0, "gpt-5.3-codex"],
+            [0, 1.75],
+            [0, 0.175],
+            [0, 14],
+          ],
+        ],
+        [
+          1,
+          [
+            [0, "gpt-5.4 (<272K context length)"],
+            [0, 2.5],
+            [0, 0.25],
+            [0, 15],
+          ],
+        ],
+      ],
+    ],
+  };
+  const encodedProps = JSON.stringify(props)
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;");
+  const html = `
+    <div id="content-switcher-latest-pricing">
+      <div data-content-switcher-pane="true" data-value="standard">
+        <div class="hidden">Standard</div>
+        <astro-island component-export="TextTokenPricingTables" props="${encodedProps}"></astro-island>
+      </div>
+    </div>
+    <div id="content-switcher-legacy-pricing"></div>
+  `;
+
+  t.after(() => {
+    if (originalFetch) {
+      globalThis.fetch = originalFetch;
+      return;
+    }
+
+    delete (globalThis as { fetch?: typeof fetch }).fetch;
+  });
+
+  globalThis.fetch = async () =>
+    ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      url: "https://developers.openai.com/api/docs/pricing",
+      text: async () => html,
+    }) as Response;
+
+  const pricing = await estimateOpenAICosts({
+    summary: {
+      provider: "codex",
+      daily: [
+        {
+          date: new Date("2026-03-10T00:00:00.000Z"),
+          input: 3_000_000,
+          output: 150_000,
+          cache: { input: 1_800_000, output: 0 },
+          total: 3_150_000,
+          breakdown: [
+            {
+              name: "gpt-5.3-codex",
+              tokens: {
+                input: 1_000_000,
+                output: 100_000,
+                cache: { input: 800_000, output: 0 },
+                total: 1_100_000,
+              },
+            },
+            {
+              name: "gpt-5.4",
+              tokens: {
+                input: 2_000_000,
+                output: 50_000,
+                cache: { input: 1_000_000, output: 0 },
+                total: 2_050_000,
+              },
+            },
+          ],
+        },
+      ],
+    },
+    mode: "standard",
+    subscriptionPrice: 200,
+    startDate: new Date("2026-03-01T00:00:00.000Z"),
+    endDate: new Date("2026-03-11T23:59:59.999Z"),
+  });
+
+  assert.equal(pricing.models.length, 2);
+  assert.equal(pricing.unresolvedModels.length, 0);
+  assert.equal(pricing.models[0]?.model, "gpt-5.4");
+  assert.equal(pricing.models[1]?.model, "gpt-5.3-codex");
+  assert.equal(pricing.models[0]?.pricingModel, "gpt-5.4 (<272K context length)");
+  assert.equal(pricing.models[1]?.pricingModel, "gpt-5.3-codex");
+  assert.equal(roundCurrency(pricing.models[0]?.estimatedCost.total ?? 0), 3.5);
+  assert.equal(roundCurrency(pricing.models[1]?.estimatedCost.total ?? 0), 1.89);
+  assert.equal(roundCurrency(pricing.totals.estimatedCost.total), 5.39);
+  assert.equal(pricing.totals.cachedInput, 1_800_000);
+  assert.equal(pricing.subscriptionComparison?.months, 1);
+  assert.match(
+    pricing.notes.join("\n"),
+    /gpt-5\.4 is estimated with the official gpt-5\.4 \(<272K context length\) row/,
+  );
 });
